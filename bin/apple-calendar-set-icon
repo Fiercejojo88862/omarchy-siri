@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Install a custom Apple Calendar icon into hicolor + point the desktop entry at it.
+# Usage: apple-calendar-set-icon /path/to/icon.png
+set -euo pipefail
+SRC="${1:-}"
+[[ -f "$SRC" ]] || { echo "usage: $0 /path/to/icon.png" >&2; exit 1; }
+file "$SRC" | grep -qiE "png|jpeg" || { echo "not an image: $SRC" >&2; exit 1; }
+
+BASE="$HOME/.local/share/icons/hicolor"
+for size in 512 256 128 64 48 32; do
+    dir="$BASE/${size}x${size}/apps"
+    mkdir -p "$dir"
+    # Trim surrounding flat backdrop to the rounded icon, keep alpha, resize.
+    magick "$SRC" -trim +repage -resize "${size}x${size}" \
+        -background none -gravity center -extent "${size}x${size}" \
+        "$dir/apple-calendar.png"
+done
+# Keep the untouched original as master.
+cp "$SRC" "$BASE/apple-calendar-master.png"
+
+sed -i 's|^Icon=.*|Icon=apple-calendar|' "$HOME/.local/share/applications/apple-calendar.desktop"
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+gtk-update-icon-cache -f -t "$BASE" 2>/dev/null || true
+echo "Icon installed. If the launcher still shows the old one, log out and back in."

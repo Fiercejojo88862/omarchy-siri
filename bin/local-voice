@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# local-voice — speedy push-to-talk toggle for INS (Hyprland 0.56+)
+# Usage: local-voice toggle — press once to record, press again to send
+#        local-voice start  — begins pw-record in background
+#        local-voice stop   — stops, transcribes, dispatches
+# Design: start is instant, stop forks transcribe+LLM+dispatch so Hyprland never blocks.
+set -euo pipefail
+
+PIDFILE="/tmp/voice_record.pid"
+AUDIOFILE="/tmp/voice_command.wav"
+MODEL="$HOME/.local/share/whisper-models/ggml-base.en.bin"
+LOCK="/tmp/voice_record.lock"
+LOG="/tmp/voice_record.log"
+# NOTE: every backgrounded process below redirects stdin from /dev/null and
+# stdout/stderr to $LOG. Hyprland's exec_cmd waits for the dispatched child's
+# pipes; a background child inheriting them keeps the dispatch "running" and
+# serialises later keybindings behind it — which presented as "release does
+# nothing until I press again". Detached fds let each dispatch return at once.
+
+cmd="${1:-}"
+
+# Ensure deps
+need() { command -v "$1" >/dev/null 2>&1 || { notify-send -t 2500 "Voice" "$1 not installed"; exit 1; }; }
+
+start_recording() {
+    need pw-record
+    # if already recording, ignore repeat press
+    if [[ -f "$PIDFILE" ]]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null || true)
+        if kill -0 "$pid" 2>/dev/null; then
+            exit 0
+        else
+            rm -f "$PIDFILE"
+        fi
+    fi
+    # exclusive lock to avoid race with stop
+    exec 9>"$LOCK" 2>/dev/null || true
+    flock -n 9 || exit 0
+
+    rm -f "$AUDIOFILE"
+    # notify instantly, no delay
+    notify-send -t 800 "Voice" "Listening — press INS again to send..." 2>/dev/null || true
+    # 16k mono is what base.en expects; wav file. Detached fds ($LOG, /dev/null)
+    # so the press dispatch returns at once — see NOTE above. Plain & keeps
+    # $! accurate for PIDFILE (no setsid wrapper in between).
+    pw-record --rate=16000 --channels=1 "$AUDIOFILE" </dev/null >>"$LOG" 2>&1 &
+    echo $! > "$PIDFILE"
+    disown 2>/dev/null || true
+}
+
+stop_recording() {
+    need whisper-cli
+    if [[ ! -f "$PIDFILE" ]]; then
+        exit 0
+    fi
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    rm -f "$PIDFILE"
+    # Immediate feedback on release — confirms stop before any processing delay
+    notify-send -t 1000 "Voice" "Stopped listening — processing..." 2>/dev/null || true
+    if [[ -n "${pid:-}" ]]; then
+        kill "$pid" 2>/dev/null || true
+        # give pw-record time to flush wav header
+        for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+        # ensure file exists and has data (> 1KB)
+        if [[ ! -f "$AUDIOFILE" ]] || [[ $(stat -c%s "$AUDIOFILE" 2>/dev/null || echo 0) -lt 1500 ]]; then
+            notify-send -t 1500 "Voice" "Too short" 2>/dev/null || true
+            rm -f "$AUDIOFILE"
+            exit 0
+        fi
+    fi
+    # Fork the heavy work so key release is instant. Fully detached fds (NOTE
+    # above) so the release dispatch returns at once instead of being held
+    # open by whisper/ollama inheriting Hyprland's pipes.
+    (
+        # whisper hygiene: collapse newlines, trim, drop trailing punctuation
+        # so "Dolphin." -> "Dolphin" and bare nouns survive to the fallback.
+        TEXT=$(whisper-cli -m "$MODEL" -f "$AUDIOFILE" -t 4 --no-timestamps -nt 2>/dev/null | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[.?!,;:]*$//')
+        rm -f "$AUDIOFILE"
+        if [[ -z "$TEXT" ]]; then
+            notify-send -t 1500 "Voice" "No speech detected" 2>/dev/null || true
+            exit 0
+        fi
+        # show what was heard for 1s, then dispatch
+        notify-send -t 1200 "Voice" "Heard: $TEXT" 2>/dev/null || true
+        exec ~/.local/bin/local-voice-exec "$TEXT"
+    ) </dev/null >>"$LOG" 2>&1 &
+    disown 2>/dev/null || true
+}
+
+case "$cmd" in
+    start) start_recording ;;
+    stop)  stop_recording ;;
+    toggle)
+        # Press to talk, press again to send. PIDFILE presence = recording.
+        if [[ -f "$PIDFILE" ]]; then
+            pid=$(cat "$PIDFILE" 2>/dev/null || true)
+            if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+                stop_recording
+            else
+                rm -f "$PIDFILE"
+                start_recording
+            fi
+        else
+            start_recording
+        fi
+        ;;
+    *) echo "usage: $0 {start|stop|toggle}" >&2; exit 1 ;;
+esac

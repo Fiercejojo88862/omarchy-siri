@@ -1,0 +1,4 @@
+# Siri addressing — copy to ~/.config/voice-assistant/persona.conf
+# Honorifics rotate daily and sound only at conversation start (>180s idle)
+# and when needed (errors, confirmations). Default when absent: Sir.
+HONORIFICS=Sir

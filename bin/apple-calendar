@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Apple Calendar — native local viewer for your iCloud home + work feeds.
+Reads the merged cache from local-voice-calendar (no browser, no web app).
+Month picker on the left, agenda for the selected day on the right.
+"""
+import re
+import subprocess
+import threading
+from datetime import date, datetime
+from pathlib import Path
+
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, GLib, Gdk, Pango
+
+# Apple palette: home blue, work purple.
+HOME_COLOR = "#0A84FF"
+WORK_COLOR = "#AF52DE"
+
+APP_CSS = f"""
+.home-row {{ border-left: 4px solid {HOME_COLOR}; border-radius: 6px;
+             background: alpha({HOME_COLOR}, 0.07); }}
+.work-row {{ border-left: 4px solid {WORK_COLOR}; border-radius: 6px;
+             background: alpha({WORK_COLOR}, 0.07); }}
+.legend-home {{ color: {HOME_COLOR}; font-weight: bold; }}
+.legend-work {{ color: {WORK_COLOR}; font-weight: bold; }}
+list row {{ margin: 2px 0; }}
+"""
+
+
+def install_css():
+    provider = Gtk.CssProvider()
+    provider.load_from_data(APP_CSS.encode())
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+CACHE = Path.home() / ".local/share/voice-calendar/events.ics"
+HELPER = Path.home() / ".local/bin/local-voice-calendar"
+
+
+def parse_events():
+    """[(date|datetime, summary, location, source)] from merged cache."""
+    try:
+        text = CACHE.read_text(errors="replace")
+    except OSError:
+        return []
+    text = re.sub(r"\r?\n[ \t]", "", text)
+    out = []
+    for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.DOTALL):
+        def prop(name):
+            m = re.search(rf"{name}(?:;[^:]*)?:(.*)", block)
+            return m.group(1).strip() if m else ""
+        tag = (re.search(r"X-CAL-SOURCE:(.*)", block).group(1).strip().lower()
+               if re.search(r"X-CAL-SOURCE:(.*)", block) else "home")
+        raw = prop("DTSTART")
+        raw = re.sub(r"^.*:", "", raw) if ":" in raw and not re.match(r"^\d{8}", raw) else raw
+        dt = None
+        for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S", "%Y%m%d"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                if fmt == "%Y%m%d":
+                    dt = dt.date()
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            continue
+        summary = prop("SUMMARY").replace("\\,", ",").replace("\\;", ";") or "(No title)"
+        loc = prop("LOCATION").replace("\\,", ",")
+        out.append((dt, summary, loc, tag))
+    return out
+
+
+class AppleCalendar(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="com.example.apple-calendar")
+        self.events = []
+        self.source = "all"
+        self.day = date.today()
+
+    def do_activate(self):
+        install_css()
+        win = Gtk.ApplicationWindow(application=self, title="Apple Calendar")
+        win.set_default_size(920, 600)
+
+        header = Gtk.HeaderBar()
+        win.set_titlebar(header)
+
+        self.refresh_btn = Gtk.Button(label="Refresh")
+        self.refresh_btn.connect("clicked", self.on_refresh)
+        header.pack_start(self.refresh_btn)
+
+        self.filter = Gtk.DropDown.new_from_strings(["All", "Home", "Work"])
+        self.filter.connect("notify::selected", self.on_filter)
+        header.pack_end(self.filter)
+
+        self.status = Gtk.Label(label="Loading…")
+        header.set_title_widget(self.status)
+
+        split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        split.set_position(300)
+        win.set_child(split)
+
+        self.cal = Gtk.Calendar()
+        self.cal.connect("day-selected", self.on_day)
+        cal_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        cal_box.append(self.cal)
+        legend_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        legend_box.set_margin_start(12)
+        legend_box.set_margin_top(6)
+        dot_home = Gtk.Label(xalign=0)
+        dot_home.set_markup(f'<span foreground="{HOME_COLOR}">●</span> home')
+        dot_home.add_css_class("legend-home")
+        dot_work = Gtk.Label(xalign=0)
+        dot_work.set_markup(f'<span foreground="{WORK_COLOR}">●</span> work')
+        dot_work.add_css_class("legend-work")
+        legend_box.append(dot_home)
+        legend_box.append(dot_work)
+        cal_box.append(legend_box)
+        split.set_start_child(cal_box)
+
+        scroll = Gtk.ScrolledWindow()
+        self.list = Gtk.ListBox()
+        self.list.set_selection_mode(Gtk.SelectionMode.NONE)
+        scroll.set_child(self.list)
+        split.set_end_child(scroll)
+
+        win.present()
+        self.load_events()
+
+    def load_events(self):
+        threading.Thread(target=self._load_bg, daemon=True).start()
+
+    def _load_bg(self):
+        try:
+            subprocess.run([str(HELPER), "refresh"], capture_output=True, timeout=30)
+        except Exception:
+            pass
+        self.events = parse_events()
+        GLib.idle_add(self.render)
+
+    def on_refresh(self, _btn):
+        self.status.set_text("Refreshing…")
+        self.load_events()
+
+    def on_filter(self, dd, _pspec):
+        self.source = ["all", "home", "work"][dd.get_selected()]
+        self.render()
+
+    def on_day(self, _cal):
+        d = self.cal.get_date()
+        self.day = date(d.get_year(), d.get_month(), d.get_day_of_month())
+        self.render()
+
+    def visible(self):
+        evs = [e for e in self.events
+               if (e[0].date() if isinstance(e[0], datetime) else e[0]) == self.day]
+        if self.source != "all":
+            evs = [e for e in evs if e[3] == self.source]
+        evs.sort(key=lambda e: (isinstance(e[0], date) and not isinstance(e[0], datetime), str(e[0])))
+        return evs
+
+    def render(self):
+        while (row := self.list.get_row_at_index(0)) is not None:
+            self.list.remove(row)
+        evs = self.visible()
+        n_all = sum(1 for e in self.events
+                    if (e[0].date() if isinstance(e[0], datetime) else e[0]) == self.day)
+        self.status.set_text(
+            f"{self.day.strftime('%A, %B %-d')} — {len(evs)} shown"
+            + (f" ({n_all} total)" if self.source != "all" else ""))
+        if not evs:
+            lbl = Gtk.Label(label="Nothing scheduled — wide open.")
+            lbl.set_margin_top(24)
+            self.list.append(lbl)
+            return
+        for dt, summary, loc, tag in evs:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+            box.set_margin_start(12)
+            box.set_margin_end(12)
+            if isinstance(dt, date) and not isinstance(dt, datetime):
+                when = "All day"
+            else:
+                when = dt.strftime("%-I:%M %p").lstrip("0")
+            dot = HOME_COLOR if tag == "home" else WORK_COLOR
+            title = Gtk.Label(xalign=0)
+            title.set_markup(
+                f'<span foreground="{dot}">●</span>  '
+                f"<b>{GLib.markup_escape_text(when)}</b>  "
+                f"{GLib.markup_escape_text(summary)}")
+            title.set_wrap(True)
+            title.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            box.append(title)
+            sub = " · ".join(p for p in [loc, tag] if p)
+            if sub:
+                meta = Gtk.Label(label=sub, xalign=0)
+                meta.add_css_class("dim-label")
+                box.append(meta)
+            row = Gtk.ListBoxRow(child=box)
+            row.add_css_class("home-row" if tag == "home" else "work-row")
+            row.set_activatable(False)
+            self.list.append(row)
+
+
+if __name__ == "__main__":
+    AppleCalendar().run(None)

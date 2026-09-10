@@ -1,0 +1,7 @@
+# Apple Calendar feeds — copy to ~/.config/voice-assistant/calendar.conf (chmod 600)
+# iPhone: Calendar > Calendars > (i) > Share Calendar (public) ON > Share Link.
+# webcal:// is auto-converted to https://. These URLs are bearer secrets.
+ICS_URL_HOME=webcal://pXX-caldav.icloud.com/published/2/REPLACE_WITH_HOME_TOKEN
+ICS_URL_WORK=webcal://pXX-caldav.icloud.com/published/2/REPLACE_WITH_WORK_TOKEN
+# Or local exports (no network): ICS_FILE_WORK=~/Documents/work.ics
+# Or a comma list: ICS_FILE=~/Documents/work.ics,~/Documents/home.ics

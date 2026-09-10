@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Apple Calendar integration for Siri of Omarchy — ICS-based, no extra deps.
+
+Setup (pick one):
+  1) iPhone: Calendar > Calendars > (i) on your calendar > Share Calendar (public) ON
+     -> Share Link -> Send Link -> copy the webcal://... URL
+     Put it in ~/.config/voice-assistant/calendar.conf as:
+       ICS_URL=https://pXX-calendars.icloud.com/published/2/...
+     (webcal:// works too — it is converted to https:// automatically.)
+  2) Or export .ics: iCloud.com > Calendar > Share > Export, save to:
+       ICS_FILE=~/Documents/apple-calendar.ics
+
+Usage: local-voice-calendar today|tomorrow|next|refresh|setup
+Output: one human line for Siri to speak + show, or empty if not connected.
+Cache: ~/.local/share/voice-calendar/events.ics (refreshed max once/hour or on `refresh`).
+"""
+import re
+import subprocess
+import sys
+from datetime import datetime, date, timedelta, timezone
+from pathlib import Path
+
+CONF = Path.home() / ".config/voice-assistant/calendar.conf"
+CACHE_DIR = Path.home() / ".local/share/voice-calendar"
+CACHE = CACHE_DIR / "events.ics"
+MAX_AGE = 3600
+
+
+def _config() -> dict:
+    out = {}
+    try:
+        for line in CONF.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip().upper()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    return out
+
+
+def _sources(cfg: dict) -> list[tuple[str, str]]:
+    """(source-tag, ics-text-or-url) for home + work. Local files win when set."""
+    out: list[tuple[str, str]] = []
+    for tag, url_key, file_key in (("home", "ICS_URL_HOME", "ICS_FILE_HOME"),
+                                   ("work", "ICS_URL_WORK", "ICS_FILE_WORK")):
+        f = (cfg.get(file_key, "") or "").strip()
+        if f:
+            try:
+                src = Path(f).expanduser()
+                if src.is_file():
+                    out.append((tag, src.read_text(errors="replace")))
+                    continue
+            except OSError:
+                pass
+        url = (cfg.get(url_key, "") or "").strip()
+        if url:
+            if url.startswith("webcal://"):
+                url = "https://" + url[len("webcal://"):]
+            out.append((tag, url))
+    # Legacy single keys: ICS_URL -> home, ICS_FILE -> maybe comma list.
+    if not out:
+        url = (cfg.get("ICS_URL", "") or "").strip()
+        if url:
+            if url.startswith("webcal://"):
+                url = "https://" + url[len("webcal://"):]
+            out.append(("home", url))
+        for piece in (cfg.get("ICS_FILE", "") or "").split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                src = Path(piece).expanduser()
+                if src.is_file():
+                    out.append(("home", src.read_text(errors="replace")))
+            except OSError:
+                pass
+    return out
+
+
+def _fetch_url(url: str) -> str:
+    try:
+        r = subprocess.run(["curl", "-fsSL", "--max-time", "12", url],
+                           capture_output=True, timeout=15)
+        if r.returncode == 0 and b"BEGIN:VCALENDAR" in r.stdout:
+            return r.stdout.decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch() -> bool:
+    cfg = _config()
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    sources = _sources(cfg)
+    if not sources:
+        return False
+    # Freshness: reuse cache when recent, unless forced or a local source
+    # file changed underneath it.
+    if CACHE.is_file() and "refresh" not in sys.argv:
+        try:
+            import time as _t
+            if (_t.time() - CACHE.stat().st_mtime) < MAX_AGE:
+                local_newer = False
+                for k in ("ICS_FILE_HOME", "ICS_FILE_WORK", "ICS_FILE"):
+                    for piece in (cfg.get(k, "") or "").split(","):
+                        piece = piece.strip()
+                        if not piece:
+                            continue
+                        try:
+                            if Path(piece).expanduser().stat().st_mtime > CACHE.stat().st_mtime:
+                                local_newer = True
+                        except OSError:
+                            pass
+                if not local_newer:
+                    return True
+        except OSError:
+            pass
+    blocks: list[tuple[str, str]] = []  # (source-tag, VEVENT block)
+    seen_uids: set[str] = set()
+    for tag, payload in sources:
+        text = _fetch_url(payload) if payload.startswith("http") else payload
+        if "BEGIN:VEVENT" not in text:
+            continue
+        text = re.sub(r"\r?\n[ \t]", "", text)
+        for block in re.findall(r"BEGIN:VEVENT.*?END:VEVENT", text, re.DOTALL):
+            uid = re.search(r"UID:(.*)", block)
+            key = (tag, uid.group(1).strip() if uid else block[:80])
+            if key in seen_uids:
+                continue
+            seen_uids.add(key)
+            if "X-CAL-SOURCE" not in block:
+                block = block.replace("END:VEVENT", f"X-CAL-SOURCE:{tag}\r\nEND:VEVENT")
+            blocks.append((tag, block))
+    if not blocks:
+        return CACHE.is_file()
+    head = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//voice-calendar merged//EN\r\n"
+    CACHE.write_text(head + "\r\n".join(b for _, b in blocks) + "\r\nEND:VCALENDAR\r\n")
+    return True
+
+
+def _source_of(block: str) -> str:
+    m = re.search(r"X-CAL-SOURCE:(.*)", block)
+    return (m.group(1).strip().lower() if m else "")
+
+
+def _parse_dt(val: str) -> datetime | date | None:
+    val = val.strip()
+    # DTSTART;TZID=...:20260910T100000 or DTSTART:20260910T100000Z or DATE:20260910
+    val = re.sub(r"^.*:", "", val) if re.match(r"^\d{8}", val) is False and ":" in val else val
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S", "%Y%m%d"):
+        try:
+            dt = datetime.strptime(val, fmt)
+            if fmt.endswith("Z"):
+                dt = dt.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+            if fmt == "%Y%m%d":
+                return dt.date()
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _events(source: str = "") -> list[tuple]:
+    """(dt, summary, location, source-tag); source filters to home/work."""
+    try:
+        text = CACHE.read_text(errors="replace")
+    except OSError:
+        return []
+    # Unfold ICS line continuations.
+    text = re.sub(r"\r?\n[ \t]", "", text)
+    events = []
+    for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.DOTALL):
+        tag = _source_of(block)
+        if source and tag != source:
+            continue
+        def prop(name: str) -> str:
+            m = re.search(rf"{name}(?:;[^:]*)?:(.*)", block)
+            return m.group(1).strip() if m else ""
+        start_raw = prop("DTSTART")
+        end_raw = prop("END")
+        summary = prop("SUMMARY").replace("\\,", ",").replace("\\;", ";") or "(No title)"
+        location = prop("LOCATION").replace("\\,", ",")
+        dt = _parse_dt(start_raw)
+        if dt is None:
+            continue
+        events.append((dt, summary, location, tag or "home"))
+    return events
+
+
+def _fmt_time(dt) -> str:
+    if isinstance(dt, date) and not isinstance(dt, datetime):
+        return "all day"
+    return dt.strftime("%-I:%M %p").lstrip("0")
+
+
+def _scope_label(source: str) -> str:
+    return {"work": "work ", "home": "home "}.get(source, "")
+
+
+def _today(source: str = "") -> str:
+    if not _fetch():
+        return ""
+    scope = _scope_label(source)
+    today = date.today()
+    todays = [(d, s, loc) for d, s, loc, _ in _events(source)
+              if (d.date() if isinstance(d, datetime) else d) == today]
+    # Sort all-day last, timed by hour.
+    todays.sort(key=lambda e: (isinstance(e[0], date) and not isinstance(e[0], datetime), str(e[0])))
+    if not todays:
+        return f"Nothing on your {scope}calendar today — wide open!"
+    parts = []
+    for d, s, loc in todays[:6]:
+        piece = f"{_fmt_time(d)} {s}"
+        if loc:
+            piece += f" at {loc}"
+        parts.append(piece)
+    n = len(todays)
+    head = f"You have {n} {scope}event{'s' if n != 1 else ''} today: "
+    extra = f", plus {n - 6} more" if n > 6 else ""
+    return head + "; ".join(parts) + extra + "."
+
+
+def _tomorrow(source: str = "") -> str:
+    if not _fetch():
+        return ""
+    scope = _scope_label(source)
+    tom = today_plus(1)
+    items = [(d, s, loc) for d, s, loc, _ in _events(source)
+             if (d.date() if isinstance(d, datetime) else d) == tom]
+    if not items:
+        return f"Nothing on your {scope}calendar tomorrow."
+    items.sort(key=lambda e: str(e[0]))
+    label = f"Tomorrow ({scope.strip()} calendar)" if scope else "Tomorrow"
+    return label + ": " + "; ".join(f"{_fmt_time(d)} {s}" for d, s, _ in items[:6]) + "."
+
+
+def today_plus(n: int) -> date:
+    return date.today() + timedelta(days=n)
+
+
+def _next(source: str = "") -> str:
+    if not _fetch():
+        return ""
+    scope = _scope_label(source)
+    now = datetime.now()
+    upcoming = []
+    for d, s, loc, _ in _events(source):
+        dd = datetime.combine(d, datetime.min.time()) if isinstance(d, date) and not isinstance(d, datetime) else d
+        if dd >= now - timedelta(minutes=30):
+            upcoming.append((dd, s, loc))
+    upcoming.sort(key=lambda e: e[0])
+    if not upcoming:
+        return f"Nothing coming up on your {scope}calendar."
+    dd, s, loc = upcoming[0]
+    when = dd.strftime("%A %-I:%M %p") if dd.date() != date.today() else f"today at {_fmt_time(dd)}"
+    return f"Next up on your {scope}calendar {when}: {s}" + (f" at {loc}" if loc else "") + "."
+
+
+def _counts() -> str:
+    if not _fetch():
+        return "Calendar not connected."
+    all_events = _events()
+    homes = sum(1 for e in all_events if e[3] == "home")
+    works = sum(1 for e in all_events if e[3] == "work")
+    return f"{len(all_events)} events cached ({homes} home, {works} work)."
+
+
+if __name__ == "__main__":
+    args = [a.lower() for a in sys.argv[1:]]
+    cmd = args[0] if args else "today"
+    source = "work" if "work" in args else "home" if "home" in args else ""
+    if cmd == "setup":
+        print("Add your Apple shared-calendar links to ~/.config/voice-assistant/calendar.conf as ICS_URL_HOME/WORK.")
+        sys.exit(0)
+    if cmd == "refresh":
+        print("Refreshed." if _fetch() else "Calendar not connected.")
+        sys.exit(0)
+    if cmd == "counts":
+        print(_counts())
+    elif cmd == "tomorrow":
+        print(_tomorrow(source))
+    elif cmd == "next":
+        print(_next(source))
+    else:
+        print(_today(source))

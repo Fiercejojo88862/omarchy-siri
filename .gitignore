@@ -1,0 +1,35 @@
+# --- Voice biometrics & recordings (NEVER commit) ---
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+
+# --- Downloaded models (recreated by install.sh) ---
+*.onnx
+*.onnx.json
+*.pt
+*.pth
+*.bin
+models/
+
+# --- Live personal data ---
+calendar.conf
+events.ics
+timers.json
+notes.md
+pending_confirm
+last_interaction
+*.env
+*token*
+*secret*
+*passwd*
+
+# --- Runtime & caches ---
+__pycache__/
+*.pyc
+.cache/
+voice_tts_*.wav
+voice_tts_*.mp3
+voice_clone_raw.wav
+warm_raw.wav

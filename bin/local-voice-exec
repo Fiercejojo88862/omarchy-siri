@@ -1,0 +1,1785 @@
+#!/usr/bin/env python3
+"""Offline voice router: text -> Hyprland 0.56+ Lua dispatch or app launch via Ollama qwen2.5:3b."""
+import sys
+import json
+import os
+import shutil
+import time
+import urllib.request
+import urllib.error
+import subprocess
+import shlex
+import re
+from pathlib import Path
+from datetime import datetime, date, timedelta
+
+if len(sys.argv) < 2:
+    sys.exit(0)
+
+prompt = sys.argv[1].strip()
+if not prompt:
+    sys.exit(0)
+
+# --- deterministic app resolution (fast-path, no LLM) -----------------------
+# Whisper often returns a bare noun ("dolphin") or a phrase the LLM was never
+# taught ("open files"). Resolve those locally so common apps open instantly
+# and never hit type="none" -> "Unrecognized command".
+
+# Canonical binary -> launch target. Dolphin is the file manager here.
+APP_ALIASES = {
+    "dolphin": "dolphin",
+    "file manager": "dolphin",
+    "files": "dolphin",
+    "folder": "dolphin",
+    "file explorer": "dolphin",
+    "explorer": "dolphin",
+    "nautilus": "nautilus",
+    "gnome files": "nautilus",
+    "thunar": "thunar",
+    "firefox": "firefox",
+    "browser": "firefox",
+    "web": "firefox",
+    "internet": "firefox",
+    "chromium": "chromium",
+    "chrome": "chromium",
+    "google chrome": "chromium",
+    "terminal": "kitty",
+    "kitty": "kitty",
+    "console": "kitty",
+    "code": "code",
+    "vscode": "code",
+    "visual studio code": "code",
+    "visual studio": "code",
+    "spotify": "spotify",
+    "discord": "discord",
+    "apple calendar": "apple-calendar",
+    "calendar app": "apple-calendar",
+}
+
+XDG_APP_DIRS = (
+    Path.home() / ".local/share/applications",
+    Path("/usr/local/share/applications"),
+    Path("/usr/share/applications"),
+)
+
+
+# --- Siri of Omarchy persona: selective addressing ---------------------------
+# Honorifics (e.g. Sir) sound only at conversation start (>180s idle) and
+# when needed (errors, confirmations). Never every reply.
+# Personalize in ~/.config/voice-assistant/persona.conf:
+#   HONORIFICS=Sir,Madam
+# Default when unconfigured is neutral ("Sir").
+STATE_DIR = Path.home() / ".local/state/voice-assistant"
+PERSONA_CONF = Path.home() / ".config/voice-assistant/persona.conf"
+LAST_FILE = STATE_DIR / "last_interaction"
+IDLE_SECONDS = 180
+
+
+def _honorifics() -> tuple[str, ...]:
+    try:
+        for line in PERSONA_CONF.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key.strip().upper() == "HONORIFICS":
+                names = tuple(n.strip() for n in val.split(",") if n.strip())
+                if names:
+                    return names
+    except OSError:
+        pass
+    return ("Sir",)
+
+
+_HONORIFICS_START = _honorifics()
+
+
+def _touch_interaction() -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        LAST_FILE.write_text(str(time.time()))
+    except OSError:
+        pass
+
+
+def _is_conversation_start() -> bool:
+    try:
+        last = float(LAST_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return True
+    return (time.time() - last) > IDLE_SECONDS
+
+
+def _start_honorific() -> str:
+    # Rotate deterministically by day so it feels natural, not random.
+    try:
+        day = int(time.time() // 86400)
+        return _HONORIFICS_START[day % len(_HONORIFICS_START)]
+    except Exception:
+        return _HONORIFICS_START[0]
+
+
+def _with_address(text: str, *, force: str = "", is_start: bool = False) -> str:
+    """Prepend honorific only when starting or when needed (force='Sir')."""
+    if force:
+        return f"{force}, {text}" if text else force
+    if is_start:
+        return f"{_start_honorific()}, {text}" if text else _start_honorific()
+    return text
+
+
+def _popup(headline: str, body: str = "", glyph: str = "", timeout_ms: int = 8000) -> None:
+    """Written response in a popup. Prefers omarchy-notification-send, falls back to notify-send."""
+    if shutil.which("omarchy-notification-send"):
+        cmd = ["omarchy-notification-send", "-u", "low", "-t", str(timeout_ms)]
+        if glyph:
+            cmd += ["-g", glyph]
+        cmd += [headline]
+        if body:
+            cmd += [body]
+        try:
+            subprocess.run(cmd, check=False, timeout=5)
+            return
+        except Exception:
+            pass
+    args = ["notify-send", "-t", str(timeout_ms), headline]
+    if body:
+        args.append(body)
+    subprocess.run(args, check=False)
+
+
+def _speak(text: str) -> None:
+    try:
+        subprocess.Popen(
+            [str(Path.home() / ".local/bin/local-voice-tts"), text],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def _confirm(notify: str, *, glyph: str = "", timeout_ms: int = 6000) -> None:
+    """Every response is written in a popup AND spoken. Honorific only at start."""
+    if not notify:
+        return
+    is_start = _is_conversation_start()
+    spoken = _with_address(notify, is_start=is_start)
+    _touch_interaction()
+    _popup("Voice Assistant", spoken, glyph=glyph, timeout_ms=timeout_ms)
+    _speak(spoken)
+
+
+def _launch_binary(binary: str) -> bool:
+    try:
+        argv = shlex.split(binary)
+    except ValueError:
+        return False
+    if not argv or not argv[0]:
+        return False
+    if shutil.which(argv[0]) is None:
+        return False
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except Exception:
+        return False
+
+
+def _desktop_binary_for(query: str) -> str | None:
+    """Find a launchable binary by scanning .desktop Name/Exec (mirrors tools.py lookup)."""
+    q = query.lower().strip()
+    if not q:
+        return None
+    best: str | None = None
+    for directory in XDG_APP_DIRS:
+        if not directory.is_dir():
+            continue
+        for entry in sorted(directory.glob("*.desktop")):
+            try:
+                text = entry.read_text(errors="replace")
+            except OSError:
+                continue
+            if "NoDisplay=true" in text:
+                continue
+            name = exec_line = ""
+            for line in text.splitlines():
+                if line.startswith("Name=") and not name:
+                    name = line[5:].strip()
+                elif line.startswith("Exec=") and not exec_line:
+                    exec_line = line[5:].strip()
+            if not name or not exec_line:
+                continue
+            # Exact Name match wins (e.g. "Dolphin"), then whole-word match.
+            # Plain substring caused "hi" to open Avahi Zeroconf Browser
+            # ("avahi" contains "hi") — never match inside a longer word.
+            words = set(re.findall(r"[a-z0-9]+", name.lower()))
+            if q == name.lower():
+                cand = shlex.split(exec_line)[0] if exec_line else ""
+                cand = os.path.basename(cand)
+                if cand and shutil.which(cand):
+                    return cand
+            elif len(q) > 2 and q in words and best is None:
+                cand = re.split(r"\s", exec_line)[0] if exec_line else ""
+                cand = os.path.basename(re.sub(r"[%][A-Za-z]", "", cand)).strip()
+                if cand and shutil.which(cand):
+                    best = cand
+    return best
+
+
+def _normalise(text: str) -> str:
+    t = text.lower().strip()
+    t = re.sub(r"[.?!,;:]+$", "", t).strip()
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def try_fast_launch(raw: str) -> bool:
+    """Launch obvious 'open X' / bare app nouns without the LLM. Returns True if handled."""
+    norm = _normalise(raw)
+    # Strip leading verbs whisper keeps: "open", "launch", "start", "please open", etc.
+    m = re.match(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?:a\s+|an\s+|the\s+)?(.+)$", norm)
+    phrase = m.group(1).strip() if m else norm
+    phrase = re.sub(r"^(?:a\s+|an\s+|the\s+|my\s+)", "", phrase).strip()
+    if not phrase:
+        return False
+    # 1) alias table (covers dolphin/file manager, firefox/browser, etc.)
+    if phrase in APP_ALIASES:
+        binary = APP_ALIASES[phrase]
+        if _launch_binary(binary):
+            _confirm(f"Opening {phrase}")
+            return True
+    # 2) exact binary on PATH for single-token phrases ("dolphin", "firefox")
+    if re.fullmatch(r"[a-z0-9_.-]+", phrase) and shutil.which(phrase):
+        if _launch_binary(phrase):
+            _confirm(f"Opening {phrase}")
+            return True
+    # 3) .desktop Name scan ("Dolphin", "Firefox", "Visual Studio Code")
+    if m or " " not in norm:
+        # Only for app-shaped utterances: "open X" or a bare noun, never for
+        # workspace/window sentences like "go to workspace 2".
+        binary = _desktop_binary_for(phrase)
+        if binary and _launch_binary(binary):
+            _confirm(f"Opening {phrase}")
+            return True
+    return False
+
+
+# --- conversational: greetings, thanks, small talk ---------------------------
+# Plain chat is answered in her voice + popup, never routed to apps or the LLM.
+# ("hi" once opened Avahi Zeroconf Browser via substring match — greetings must
+# win before any launcher runs.)
+def _handle_conversational(norm: str) -> bool:
+    reply = ""
+    if re.fullmatch(r"(hi|hey|hello|yo|hiya|howdy|greetings|hey there|hi there|good morning|good afternoon|good evening)[.! ]*", norm):
+        reply = "Hey! What can I do for you?"
+    elif re.fullmatch(r"(thanks|thank you|thankyou|thx|thanks a lot|thank you so much|appreciated|much appreciated)[.! ]*", norm):
+        reply = "Anytime!"
+    elif re.fullmatch(r"(bye|goodbye|good ?night|see you|see ya|later|talk to you later|good talk)[.! ]*", norm):
+        reply = "Goodbye for now!"
+    elif re.search(r"how are you|how'?s it going|how do you feel|how are things", norm):
+        reply = "Running smooth and happy to help!"
+    elif re.search(r"who are you|your name|what are you|about yourself|introduce yourself", norm):
+        reply = "I'm your Siri of Omarchy, running right here on your machine!"
+    elif re.fullmatch(r"(sorry|my bad|my apologies|excuse me|oops)[.! ]*", norm):
+        reply = "No worries at all!"
+    elif re.fullmatch(r"(yes|yeah|yep|yup|sure|ok|okay|alright|gotcha|cool|great|awesome|perfect|nice|sounds good)[.! ]*", norm):
+        # "Yes" first checks the confirmation gate (destructive actions).
+        if _take_pending("yes"):
+            return True
+        reply = "Got it."
+    elif re.fullmatch(r"(no|nope|nah|not really|never mind|forget it|cancel|don'?t)[.! ]*", norm):
+        if _take_pending("no"):
+            return True
+        reply = "No problem."
+    elif re.search(r"i love you|you'?re (the best|awesome|amazing|great)|love ya", norm):
+        reply = "That's very kind of you to say!"
+    if not reply:
+        return False
+    _confirm(reply)
+    return True
+
+
+# --- system power: safe ops run at once, destructive ones ask first -----------
+# Persona rule: execute direct actions immediately; concise confirmation only
+# before destructive/high-risk changes. Pending confirmations live in
+# PENDING_FILE for 60s; "yes"/"no" resolves them (see conversational).
+PENDING_FILE = STATE_DIR / "pending_confirm"
+PENDING_TTL = 60
+
+# Safe: run immediately. Destructive: ask, then run on "yes".
+SYSTEM_SAFE = {
+    "lock": (r"(^lock[.! ]*$|\block the (screen|computer|machine|pc|laptop|system)\b)",
+             ["omarchy", "system", "lock"], "Locked."),
+    "wake": (r"\bwake (the )?(display|screen|monitor)s?\b",
+             ["omarchy", "system", "wake"], "Displays on."),
+    "stats": (r"\b(cpu|memory|system) (stats|status|usage|load)\b",
+              ["omarchy", "system", "stats"], ""),
+}
+SYSTEM_DESTRUCTIVE = {
+    "shutdown": (r"\b(shut ?down|power off|turn off (the )?(computer|machine|pc|laptop|system))\b",
+                 ["omarchy", "system", "shutdown"], "Shutting down"),
+    "reboot": (r"\b(reboot|restart( the)? (computer|machine|pc|laptop|system)|^reboot[.! ]*$|^restart[.! ]*$)",
+               ["omarchy", "system", "reboot"], "Rebooting"),
+    "logout": (r"\b(log ?out|sign ?out)\b",
+               ["omarchy", "system", "logout"], "Logging out"),
+}
+
+
+def _ask_confirm(key: str, label: str, argv: list[str]) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        PENDING_FILE.write_text(json.dumps(
+            {"key": key, "label": label, "argv": argv,
+             "exp": time.time() + PENDING_TTL}))
+    except OSError:
+        pass
+    addressed = _with_address(
+        f"This will close everything. Say yes to confirm {key}, or no to cancel.",
+        force="Sir")
+    _touch_interaction()
+    _popup("Confirm", addressed, timeout_ms=8000)
+    _speak(addressed)
+
+
+def _take_pending(answer: str) -> bool:
+    """Resolve a pending destructive confirmation. True if one was consumed."""
+    try:
+        pending = json.loads(PENDING_FILE.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(pending, dict) or time.time() > float(pending.get("exp", 0)):
+        try:
+            PENDING_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    try:
+        PENDING_FILE.unlink()
+    except OSError:
+        pass
+    if answer == "yes":
+        subprocess.run(pending["argv"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        _confirm(f"{pending.get('label', 'Done')} now.")
+    else:
+        _confirm("Cancelled.")
+    return True
+
+
+def _handle_system(norm: str) -> bool:
+    for key, (pat, argv, done) in SYSTEM_SAFE.items():
+        if re.search(pat, norm):
+            if key == "stats":
+                out = _run(argv, timeout=8)[:400] or "Stats unavailable."
+                _popup("System stats", out, timeout_ms=9000)
+                _speak(_with_address("Stats are on screen.", is_start=_is_conversation_start()))
+                _touch_interaction()
+            else:
+                subprocess.run(argv, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=False)
+                _confirm(done)
+            return True
+    for key, (pat, argv, label) in SYSTEM_DESTRUCTIVE.items():
+        if re.search(pat, norm):
+            _ask_confirm(key, label, argv)
+            return True
+    return False
+
+
+# --- device controls: audio, display, connectivity, system status ------------
+def _players() -> list[str]:
+    out = _run(["playerctl", "-l"], timeout=4)
+    return [p.strip() for p in out.splitlines() if p.strip() and "No players" not in out]
+
+
+def _handle_media(norm: str) -> bool:
+    # Volume to N%: absolute via pactl (omarchy route is relative-only).
+    m = re.search(r"(?:volume|sound).{0,12}(\d{1,3})\s*%|(\d{1,3})\s*%.*volume|set .*volume to (\d{1,3})", norm)
+    if m:
+        pct = next(int(g) for g in m.groups() if g is not None)
+        pct = max(0, min(100, pct))
+        r = subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"],
+                           capture_output=True, timeout=5)
+        _confirm(f"Volume {pct} percent." if r.returncode == 0 else "Sorry, volume didn't change.")
+        return True
+    if re.search(r"\bvolume up|turn (it|the volume|sound) up|raise (the )?volume|louder\b", norm):
+        _run(["omarchy", "audio", "output", "volume", "raise"])
+        _confirm("Volume up.")
+        return True
+    if re.search(r"\bvolume down|turn (it|the volume|sound) down|lower (the )?volume|quieter\b", norm):
+        _run(["omarchy", "audio", "output", "volume", "lower"])
+        _confirm("Volume down.")
+        return True
+    if re.search(r"\b(unmute|un mute)\b", norm):
+        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"],
+                       capture_output=True, timeout=5)
+        _confirm("Audio on.")
+        return True
+    if re.search(r"\bmute\b", norm):
+        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"],
+                       capture_output=True, timeout=5)
+        _confirm("Muted.")
+        return True
+    if re.search(r"\bwhat (song|track|music).*(playing|on)|what.*playing now|currently playing\b", norm):
+        if not _players():
+            _confirm("Nothing is playing right now.")
+            return True
+        meta = _run(["playerctl", "metadata", "--format", "{{artist}} - {{title}}"], timeout=4)
+        meta = meta.strip(" -")[:160] or "Something is playing."
+        _confirm(f"Playing: {meta}.")
+        return True
+    if re.search(r"\bnext (track|song)|skip (this|the )?(track|song|video|it)?\b", norm):
+        if not _players():
+            _confirm("Nothing is playing right now.")
+            return True
+        _run(["playerctl", "next"])
+        _confirm("Next.")
+        return True
+    if re.search(r"\b(previous|last) (track|song)|go back\b", norm):
+        if not _players():
+            _confirm("Nothing is playing right now.")
+            return True
+        _run(["playerctl", "previous"])
+        _confirm("Previous track.")
+        return True
+    if "timer" not in norm and re.search(r"\b(pause|play|resume|stop).*(video|music|song|track|playback|it|this)\b|\b(pause|resume|play)\b", norm):
+        if not _players():
+            _confirm("Nothing is playing right now.")
+            return True
+        _run(["playerctl", "play-pause"])
+        _confirm("Done.")
+        return True
+    return False
+
+
+def _handle_display(norm: str) -> bool:
+    m = re.search(r"brightness (to |at )?(\d{1,3})\s*%|set .*brightness to (\d{1,3})|(\d{1,3})\s*%.*bright", norm)
+    if m:
+        pct = next(int(g) for g in m.groups() if g is not None)
+        pct = max(1, min(100, pct))
+        _run(["omarchy", "brightness", "display", f"{pct}%"])
+        _confirm(f"Brightness {pct} percent.")
+        return True
+    if re.search(r"\bbright(er|en (it|the (screen|display))|ness up)\b", norm):
+        _run(["omarchy", "brightness", "display", "+10%"])
+        _confirm("Brighter.")
+        return True
+    if re.search(r"\bdim(mer)?\b|brightness down|darker\b", norm):
+        _run(["omarchy", "brightness", "display", "10%-"])
+        _confirm("Dimmer.")
+        return True
+    m = re.search(r"night ?light|night ?shift|blue light", norm)
+    if m:
+        want = "on" if re.search(r"\b(on|enable|start)\b", norm) else \
+               "off" if re.search(r"\b(off|disable|stop)\b", norm) else "toggle"
+        if want == "toggle":
+            _run(["omarchy", "toggle", "nightlight"])
+            _confirm("Night light toggled.")
+            return True
+        try:
+            is_on = bool(json.loads(
+                _run(["omarchy", "toggle", "nightlight", "--status"]) or "{}").get("enabled"))
+        except (ValueError, AttributeError):
+            is_on = False
+        if (want == "on") == bool(is_on):
+            _confirm(f"Night light already {want}.")
+        else:
+            _run(["omarchy", "toggle", "nightlight"])
+            _confirm(f"Night light {want}.")
+        return True
+    if re.search(r"\b(sleep|go to sleep|put .*to sleep|suspend)\b", norm):
+        _confirm("Sleeping now.")
+        subprocess.run(["systemctl", "suspend"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        return True
+    return False
+
+
+def _handle_connectivity(norm: str) -> bool:
+    if re.search(r"\bwifi\b.*\boff\b|\bturn off wifi|\bdisable wifi|\bwifi off\b", norm):
+        _run(["nmcli", "radio", "wifi", "off"])
+        _confirm("Wi-Fi off.")
+        return True
+    if re.search(r"\bwifi\b.*\bon\b|\bturn on wifi|\benable wifi|\bwifi on\b", norm):
+        _run(["nmcli", "radio", "wifi", "on"])
+        _confirm("Wi-Fi on.")
+        return True
+    if re.search(r"\btoggle wifi\b|\bwifi toggle\b", norm):
+        cur = _run(["nmcli", "-t", "-f", "WIFI", "radio"]).strip().lower()
+        _run(["nmcli", "radio", "wifi", "off" if cur == "enabled" else "on"])
+        _confirm(f"Wi-Fi {'off' if cur == 'enabled' else 'on'}.")
+        return True
+    if re.search(r"\binternet (connection )?(status|connected|working)|connection status|am i (online|connected)|network status\b", norm):
+        out = _run(["omarchy", "network", "status"])[:300] or "Network status unavailable."
+        _touch_interaction()
+        _popup("Network", out, timeout_ms=8000)
+        _speak(_with_address(f"Connection looks {'up' if 'unavailable' not in out.lower() else 'down'}.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    if re.search(r"\bbluetooth\b.*(devices|list|available|paired)|show .*bluetooth|scan.*bluetooth\b", norm):
+        out = _run(["bluetoothctl", "--timeout", "4", "devices"], timeout=8)
+        names = [l.split(" ", 2)[2] for l in out.splitlines()
+                 if l.startswith("Device ") and len(l.split(" ", 2)) == 3][:8]
+        body = "\n".join(names) if names else "No Bluetooth devices found."
+        _touch_interaction()
+        _popup("Bluetooth", body, timeout_ms=8000)
+        n = len(names)
+        _speak(_with_address(
+            f"{n} Bluetooth device{'s' if n != 1 else ''} found: {', '.join(names[:4])}."
+            if names else "No Bluetooth devices around.", is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    return False
+
+
+def _handle_sysinfo(norm: str) -> bool:
+    if re.search(r"\bbattery\b.*(left|level|percent|status|remaining)|how much battery|battery (level|status|left)\b", norm):
+        out = _run(["omarchy", "battery", "status"])[:200] or "Battery info unavailable."
+        m = re.search(r"(\d+)\s*%", out)
+        speak = f"Battery at {m.group(1)} percent." if m else out[:160]
+        _touch_interaction()
+        _popup("Battery", out, timeout_ms=8000)
+        _speak(_with_address(speak, is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    if re.search(r"\b(cpu|memory|ram|processor).*(usage|load|status|how)|how much (memory|ram)|system (stats|status|load)\b", norm):
+        out = _run(["omarchy", "system", "stats"], timeout=8)[:400] or "Stats unavailable."
+        _touch_interaction()
+        _popup("System", out, timeout_ms=9000)
+        _speak(_with_address("Stats are on screen.", is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    if re.search(r"\b(disk|storage|drive).*(space|free|left|usage|full)|how much .*disk|free space\b", norm):
+        try:
+            total, used, free = shutil.disk_usage("/")
+            gb = lambda b: round(b / 1e9, 1)
+            body = f"/ : {gb(free)}G free of {gb(total)}G ({gb(used)}G used)"
+            speak = f"{gb(free)} gigabytes free."
+        except OSError:
+            body, speak = "Disk info unavailable.", "Sorry, I couldn't read the disk."
+        _touch_interaction()
+        _popup("Disk", body, timeout_ms=8000)
+        _speak(_with_address(speak, is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    return False
+
+
+# --- everyday tasks: weather / time / reminders / calendar --------------------
+def _run(cmd: list[str], timeout: float = 6.0) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = (r.stdout or "").strip()
+        return out
+    except Exception:
+        return ""
+
+
+def _speakable_weather(status: str) -> str:
+    # "Matawan · Temp 79°F · Wind ↑14mph" -> "It's 79 degrees in Matawan with a 14 mile per hour wind!"
+    m = re.search(r"(.+?)\s*·\s*Temp\s*([-\d.]+)°?\s*([CF])?.*?Wind\s*.?([\d.]+)\s*(\w+)?", status)
+    if not m:
+        return status
+    place, temp, unit, wind, wunit = m.group(1).strip(), m.group(2), m.group(3) or "F", m.group(4), m.group(5) or "mph"
+    deg = "degrees" if unit.upper().startswith("F") else "degrees Celsius"
+    return f"It's {temp} {deg} in {place} with a {wind} mile per hour wind!"
+
+
+_TIME_WORDS = ("today", "tonight", "tomorrow", "this weekend", "this week",
+               "right now", "currently", "outside", "outside right now", "please")
+
+
+def _extract_place(norm: str) -> str | None:
+    """A named place in a weather question ("weather in London"), or None for here."""
+    # "... in|for|at <Place>" with the weather word before or after it.
+    patterns = [
+        r"(?:weather|forecast|temperature|rain|hot|cold|warm|humid|windy|cloudy|sunny|snow|storm|umbrella|jacket)\b.*?\b(?:in|for|at|near)\s+([a-z][a-z .,'\-]{1,48}?)(?:\s+(?:today|tonight|tomorrow|this weekend|right now|currently|please))?[.?! ]*$",
+        r"\b(?:in|for|at|near)\s+([a-z][a-z .,'\-]{1,48}?)\s+(?:weather|forecast|temperature|rain)\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, norm)
+        if not m:
+            continue
+        place = m.group(1).strip(" .!?,")
+        for w in sorted(_TIME_WORDS, key=len, reverse=True):
+            if place.endswith(" " + w):
+                place = place[: -len(w)].strip()
+        place = re.sub(r"^(the|my)\s+", "", place).strip()
+        if place and place not in ("here", "home", "my location", "current location",
+                                   "my area", "my place", "town", "city"):
+            return place
+    return None
+
+
+def _remote_weather(place: str) -> tuple[str, str]:
+    """(status, condition) for a named place via wttr.in, or ('', '') on failure."""
+    from urllib.parse import quote
+    query = quote(place, safe="")
+    try:
+        r = subprocess.run(
+            ["curl", "-fsS", "--max-time", "6",
+             f"https://wttr.in/{query}?format=%l|%t|%C|%w"],
+            capture_output=True, text=True, timeout=8)
+        raw = (r.stdout or "").strip()
+    except Exception:
+        return "", ""
+    if not raw or "|" not in raw:
+        return "", ""
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) < 4 or not parts[1]:
+        return "", ""
+    loc, temp, cond, wind = parts[0], parts[1].lstrip("+"), parts[2], parts[3]
+    temp = re.sub(r"°[CF]$", "", temp).strip()
+    wind_num = (re.search(r"[\d.]+", wind or "") or ["?"])[0]
+    status = f"{loc}  ·  Temp {temp}  ·  {cond}  ·  Wind {wind}"
+    speak = f"In {loc}, it's {temp} degrees with {cond.lower()} and a {wind_num} mile per hour wind!"
+    return status, speak
+
+
+_DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday",
+              "saturday", "sunday")
+
+
+def _fetch_forecast(place: str | None) -> dict | None:
+    """Live 3-day + hourly forecast via wttr.in j1 (chance of rain included)."""
+    from urllib.parse import quote
+    query = quote(place, safe="") if place else ""
+    try:
+        r = subprocess.run(
+            ["curl", "-fsS", "--max-time", "8", f"https://wttr.in/{query}?format=j1"],
+            capture_output=True, text=True, timeout=10)
+        data = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+    except Exception:
+        return None
+    if not data or not data.get("weather"):
+        return None
+    return data
+
+
+def _forecast_place_name(data: dict, fallback: str) -> str:
+    try:
+        area = data["nearest_area"][0]
+        name = area["areaName"][0]["value"]
+        country = area["country"][0]["value"]
+        if country and country.lower() not in ("united states of america",):
+            return f"{name}, {country}"
+        return name
+    except (KeyError, IndexError, TypeError):
+        return fallback or "here"
+
+
+def _hour_label(t: str) -> str:
+    try:
+        h = int(t) // 100
+    except (ValueError, TypeError):
+        return ""
+    if h == 0:
+        return "midnight"
+    if h == 12:
+        return "noon"
+    return f"{h - 12 if h > 12 else h} {'pm' if h >= 12 else 'am'}"
+
+
+def _day_summary(day: dict, label: str, loc: str) -> tuple[str, str]:
+    """(popup line, spoken sentence) for one forecast day, rain-first."""
+    try:
+        hi, lo = day["maxtempF"], day["mintempF"]
+    except KeyError:
+        return "", ""
+    hourly = day.get("hourly") or []
+    peak_rain, peak_t, peak_desc = 0, "", ""
+    descs: dict[str, int] = {}
+    for h in hourly:
+        try:
+            chance = int(h.get("chanceofrain") or 0)
+        except (ValueError, TypeError):
+            chance = 0
+        desc = ""
+        try:
+            desc = h["weatherDesc"][0]["value"]
+        except (KeyError, IndexError, TypeError):
+            pass
+        if desc:
+            descs[desc] = descs.get(desc, 0) + 1
+        if chance > peak_rain:
+            peak_rain, peak_t = chance, _hour_label(h.get("time", ""))
+            peak_desc = desc
+    top_desc = max(descs, key=descs.get) if descs else ""
+    if peak_rain >= 50:
+        rain_speak = (f"Rain is likely — {peak_rain}% chance"
+                      + (f" around {peak_t}" if peak_t else "") + ".")
+        rain_line = f"Rain {peak_rain}%" + (f" ~{peak_t}" if peak_t else "")
+    elif peak_rain >= 20:
+        rain_speak = f"a {peak_rain}% chance of rain" + (f" around {peak_t}." if peak_t else ".")
+        rain_line = f"Rain {peak_rain}%" + (f" ~{peak_t}" if peak_t else "")
+    else:
+        rain_speak, rain_line = "no rain expected.", "No rain"
+    popup = f"{label} {loc}: {hi}°F / {lo}°F, {top_desc or '—'}, {rain_line}"
+    if peak_rain >= 50:
+        speak = f"{label} in {loc}: high {hi}, low {lo}. {rain_speak}"
+    elif peak_rain >= 20:
+        speak = f"{label} in {loc}: high {hi}, low {lo}, with {rain_speak}"
+    else:
+        speak = f"{label} in {loc}: high {hi}, low {lo}, {top_desc.lower() + ', ' if top_desc else ''}{rain_speak}"
+    return popup, speak
+
+
+def _handle_forecast(norm: str, place: str | None) -> bool:
+    data = _fetch_forecast(place)
+    loc = _forecast_place_name(data, place or "here") if data else (place or "here")
+    if not data:
+        addressed = _with_address(
+            f"Sorry, I couldn't reach the forecast for {loc}.", force="Sir")
+        _touch_interaction()
+        _popup("Weather", addressed, timeout_ms=6000)
+        _speak(addressed)
+        return True
+    days = data["weather"]
+    today = date.today()
+
+    def find_day(offset: int) -> dict | None:
+        want = (today + timedelta(days=offset)).isoformat()
+        return next((d for d in days if d.get("date") == want), None)
+
+    popups, speaks = [], []
+    if "weekend" in norm or ("saturday" in norm and "sunday" in norm):
+        lines = []
+        for d in days:
+            try:
+                wd = datetime.strptime(d["date"], "%Y-%m-%d").strftime("%A")
+            except (ValueError, KeyError):
+                continue
+            if wd in ("Saturday", "Sunday"):
+                p, s = _day_summary(d, wd, loc)
+                if p:
+                    lines.append((p, s))
+        if not lines:
+            addressed = _with_address(
+                f"The weekend falls outside my 3-day forecast for {loc}.", force="Sir")
+            _touch_interaction()
+            _popup("Weather", addressed, timeout_ms=6000)
+            _speak(addressed)
+            return True
+        popups = [p for p, _ in lines]
+        speaks = " ".join(s for _, s in lines)
+    elif "tonight" in norm or "this evening" in norm:
+        day = find_day(0)
+        if not day:
+            return False
+        evening = [h for h in day.get("hourly", [])
+                   if str(h.get("time", "")).isdigit() and int(h["time"]) >= 1800]
+        peak = max((int(h.get("chanceofrain") or 0) for h in evening), default=0)
+        temps = [h.get("tempF") for h in evening if h.get("tempF")]
+        desc = ""
+        try:
+            desc = evening[0]["weatherDesc"][0]["value"] if evening else ""
+        except (KeyError, IndexError, TypeError):
+            pass
+        popups = [f"Tonight {loc}: {temps[0] if temps else '?'}°F, {desc or '—'}, rain {peak}%"]
+        speaks = (f"Tonight in {loc}: {temps[0] + ' degrees' if temps else ''}"
+                  f"{', ' + desc.lower() if desc else ''}, "
+                  f"{f'{peak}% chance of rain.' if peak >= 20 else 'no rain expected.'}")
+    else:
+        named = next((d for d in _DAY_NAMES if d in norm), "")
+        if named:
+            idx = (_DAY_NAMES.index(named) - today.weekday()) % 7
+            label = named.capitalize()
+        elif "tomorrow" in norm or "day after" in norm:
+            idx = 2 if "day after" in norm else 1
+            label = "Day after tomorrow" if idx == 2 else "Tomorrow"
+        else:
+            idx, label = 0, "Today"
+        day = find_day(idx)
+        if not day:
+            addressed = _with_address(
+                f"I can only see 3 days out for {loc}, Sir.", force="Sir")
+            _touch_interaction()
+            _popup("Weather", addressed, timeout_ms=6000)
+            _speak(addressed)
+            return True
+        p, s = _day_summary(day, label, loc)
+        popups, speaks = [p], s
+
+    is_start = _is_conversation_start()
+    spoken = _with_address(speaks, is_start=is_start)
+    _touch_interaction()
+    body = "\n".join(popups) + "\nvia wttr.in"
+    if shutil.which("omarchy-notification-send"):
+        cmd = ["omarchy-notification-send", "-u", "low", "-t", "10000",
+               "Weather", body, "--exec", "omarchy-shell", "shell",
+               "toggle", "omarchy.weather"]
+        try:
+            subprocess.run(cmd, check=False, timeout=5)
+        except Exception:
+            _popup("Weather", body, timeout_ms=10000)
+    else:
+        _popup("Weather", body, timeout_ms=10000)
+    _speak(spoken)
+    return True
+
+
+def _wants_forecast(norm: str) -> bool:
+    if re.search(r"\b(tomorrow|tonight|this evening|weekend|forecast|day after|"
+                 r"will it rain|going to rain|chance of rain|"
+                 r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", norm):
+        return True
+    return bool(re.search(r"\brain\b", norm))
+
+
+def _handle_weather(norm: str = "") -> bool:
+    place = _extract_place(norm) if norm else None
+    if norm and _wants_forecast(norm):
+        return _handle_forecast(norm, place)
+    if place:
+        status, speak = _remote_weather(place)
+        if not status:
+            addressed = _with_address(f"Sorry, I couldn't find the weather for {place}.", force="Sir")
+            _touch_interaction()
+            _popup("Weather", addressed, timeout_ms=6000)
+            _speak(addressed)
+            return True
+        icon = ""
+    else:
+        status = _run(["omarchy-weather-status"])
+        if not status or "unavailable" in status.lower():
+            _confirm("Sorry, I couldn't reach the weather service.", glyph="")
+            return True
+        icon = _run(["omarchy-weather-icon"]) or ""
+        speak = _speakable_weather(status)
+    is_start = _is_conversation_start()
+    spoken = _with_address(speak, is_start=is_start)
+    _touch_interaction()
+    # Written response in popup + optional panel on click.
+    if shutil.which("omarchy-notification-send"):
+        cmd = ["omarchy-notification-send", "-u", "low", "-t", "9000"]
+        if icon:
+            cmd += ["-g", icon]
+        cmd += ["Weather", f"{status}\nvia wttr.in", "--exec", "omarchy-shell", "shell", "toggle", "omarchy.weather"]
+        try:
+            subprocess.run(cmd, check=False, timeout=5)
+        except Exception:
+            _popup("Weather", status, glyph=icon)
+    else:
+        _popup("Weather", status, glyph=icon)
+    _speak(spoken)
+    return True
+
+
+# --- timers: named, pausable, queryable (own systemd units, no clashes) -----
+TIMERS_FILE = STATE_DIR / "timers.json"
+
+
+def _load_timers() -> dict:
+    try:
+        data = json.loads(TIMERS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_timers(data: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        TIMERS_FILE.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+def _fmt_dur(secs: float) -> str:
+    secs = max(0, int(secs))
+    h, r = divmod(secs, 3600)
+    m, s = divmod(r, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s" if s and m < 5 else f"{m} minute{'s' if m != 1 else ''}"
+    return f"{s} second{'s' if s != 1 else ''}"
+
+
+def _parse_duration(norm: str) -> tuple[float | None, str]:
+    """(seconds, label-remainder) from '10 minutes for pizza' etc."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b(.*)", norm)
+    if not m:
+        return None, ""
+    n = float(m.group(1))
+    unit = m.group(2).lower()
+    mult = 3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1
+    rest = (m.group(3) or "").strip(" ,.!-")
+    rest = re.sub(r"^(for|called|named|about|to|to remind me (to|about)?)\s+", "", rest).strip()
+    return n * mult, rest
+
+
+def _timer_fire(label: str) -> list[str]:
+    return ["omarchy-notification-send", "-u", "critical", "Timer",
+            f"{label} — time's up!"]
+
+
+def _handle_timers(norm: str) -> bool:
+    timers = _load_timers()
+    now = time.time()
+    # Drop long-dead running timers from the list (fired already).
+    timers = {k: v for k, v in timers.items()
+              if v.get("state") != "running" or v.get("ends", 0) > now - 3600}
+    msg = norm
+
+    def pick(label_hint: str = "") -> tuple[str, dict] | tuple[None, None]:
+        cands = [(k, v) for k, v in timers.items() if v.get("state") in ("running", "paused")]
+        if label_hint:
+            hit = [(k, v) for k, v in cands if label_hint in v.get("label", "").lower()]
+            if hit:
+                return hit[0]
+        running = [(k, v) for k, v in cands if v.get("state") == "running"]
+        if running:
+            return max(running, key=lambda kv: kv[1].get("ends", 0))
+        return cands[0] if cands else (None, None)
+
+    # Cancel / stop.
+    if re.search(r"\b(cancel|stop|delete|clear|kill).{0,10}timer|\btimer.{0,10}(cancel|stop|delete|clear|off)\b", norm):
+        tid, t = pick()
+        if not t:
+            _confirm("No active timers.")
+            return True
+        subprocess.run(["systemctl", "--user", "stop", f"voice-timer-{tid}.timer"],
+                       capture_output=True, timeout=5)
+        timers.pop(tid, None)
+        _save_timers(timers)
+        _confirm(f"Timer {t.get('label', '')} cancelled.")
+        return True
+    # Pause.
+    if re.search(r"\bpause.{0,10}timer|\btimer.{0,10}pause\b", norm):
+        hint = re.sub(r".*timer (called|named|for) ", "", norm) \
+            if re.search(r"timer (called|named|for) ", norm) else ""
+        tid, t = pick(hint.strip())
+        if not t or t.get("state") != "running":
+            _confirm("No running timer to pause.")
+            return True
+        remaining = max(0, t["ends"] - now)
+        subprocess.run(["systemctl", "--user", "stop", f"voice-timer-{tid}.timer"],
+                       capture_output=True, timeout=5)
+        t["state"], t["remaining"] = "paused", remaining
+        _save_timers(timers)
+        _confirm(f"Paused with {_fmt_dur(remaining)} left.")
+        return True
+    # Resume.
+    if re.search(r"\b(resume|continue|unpause).{0,10}timer|\btimer.{0,10}(resume|continue)\b", norm):
+        paused = [(k, v) for k, v in timers.items() if v.get("state") == "paused"]
+        if not paused:
+            _confirm("No paused timer to resume.")
+            return True
+        tid, t = paused[0]
+        secs = max(1, int(t.get("remaining", 60)))
+        subprocess.run(["systemd-run", "--user", f"--unit=voice-timer-{tid}",
+                        f"--on-active={secs}s", "--timer-property=AccuracySec=5s",
+                        *_timer_fire(t.get("label", "Timer"))],
+                       capture_output=True, timeout=8)
+        t["state"], t["ends"] = "running", now + secs
+        t.pop("remaining", None)
+        _save_timers(timers)
+        _confirm(f"Resumed with {_fmt_dur(secs)} left.")
+        return True
+    # Time left / show.
+    if re.search(r"\b(how much time|time left|time remaining|check|show|status).{0,12}timer|\btimer.{0,12}(left|remaining|status|show)\b", norm):
+        live = [(v.get("label", "Timer"),
+                 v["ends"] - now if v.get("state") == "running" else v.get("remaining", 0),
+                 v.get("state"))
+                for v in timers.values() if v.get("state") in ("running", "paused")]
+        if not live:
+            _confirm("No active timers.")
+            return True
+        lines = [f"{lbl}: {_fmt_dur(rem)} left ({st})" for lbl, rem, st in live]
+        body = "\n".join(lines)
+        _touch_interaction()
+        _popup("Timers", body, timeout_ms=8000)
+        first, rem, _ = live[0]
+        extra = f", plus {len(live) - 1} more" if len(live) > 1 else ""
+        _speak(_with_address(f"{_fmt_dur(rem)} left on {first}{extra}.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    # Set.
+    if re.search(r"\btimer\b", norm):
+        secs, label = _parse_duration(norm)
+        if not secs or secs < 1 or secs > 12 * 3600:
+            _confirm("Sorry — tell me how long, like set a timer for 10 minutes for pizza.")
+            return True
+        label = label or "Timer"
+        tid = re.sub(r"\W+", "", label.lower())[:12] + str(int(now) % 100000)
+        subprocess.run(["systemd-run", "--user", f"--unit=voice-timer-{tid}",
+                        f"--on-active={int(secs)}s", "--timer-property=AccuracySec=5s",
+                        *_timer_fire(label)], capture_output=True, timeout=8)
+        timers[tid] = {"label": label, "total": secs, "ends": now + secs, "state": "running"}
+        _save_timers(timers)
+        _confirm(f"Timer set for {_fmt_dur(secs)}: {label}.")
+        return True
+    return False
+
+
+# --- notes: quick spoken notebook -------------------------------------------
+NOTES_FILE = STATE_DIR / "notes.md"
+
+
+def _handle_notes(norm: str) -> bool:
+    if re.search(r"\b(clear|delete|forget)( my| all)? notes?\b", norm):
+        try:
+            NOTES_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _confirm("Notes cleared.")
+        return True
+    m = re.search(r"\btake a (quick )?note:?\s+(.+)|note (that|to self:?)\s+(.+)|write (this|that) down:?\s+(.+)", norm)
+    if m:
+        text = next(g for g in m.groups()[1:] if g) if m.groups()[0] else (m.group(2) or "")
+        text = (text or "").strip()[:240]
+        if not text:
+            return False
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with NOTES_FILE.open("a") as f:
+                f.write(f"- [{datetime.now():%Y-%m-%d %H:%M}] {text}\n")
+        except OSError:
+            pass
+        _confirm("Noted.")
+        return True
+    if re.search(r"\b(show|read|list|what are)( my)? notes?\b", norm):
+        try:
+            lines = [l.strip() for l in NOTES_FILE.read_text().splitlines() if l.strip()]
+        except OSError:
+            lines = []
+        if not lines:
+            _confirm("No notes yet.")
+            return True
+        body = "\n".join(lines[-8:])
+        _touch_interaction()
+        _popup("Notes", body, timeout_ms=9000)
+        latest = re.sub(r"^-\s*\[.*?\]\s*", "", lines[-1])[:120]
+        extra = f" Plus {len(lines) - 1} more." if len(lines) > 1 else ""
+        _speak(_with_address(f"{len(lines)} note{'s' if len(lines) != 1 else ''}. Latest: {latest}.{extra}",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    return False
+
+
+# --- answers: safe local calculator + conversions, spell-out ------------------
+import ast as _ast
+
+_CONVERT = {
+    # (from-names, to-name, factor|func) — factor multiplies, func maps value.
+    "fahrenheit": (("fahrenheit", "fahrenheits", "f"), "celsius", lambda v: (v - 32) * 5 / 9),
+    "celsius": (("celsius", "c"), "fahrenheit", lambda v: v * 9 / 5 + 32),
+    "miles": (("miles", "mile", "mi"), "kilometers", 1.60934),
+    "kilometers": (("kilometers", "kilometer", "km", "kms"), "miles", 1 / 1.60934),
+    "feet": (("feet", "foot", "ft"), "meters", 0.3048),
+    "meters": (("meters", "meter", "m"), "feet", 3.28084),
+    "inches": (("inches", "inch", "in"), "centimeters", 2.54),
+    "centimeters": (("centimeters", "centimeter", "cm"), "inches", 1 / 2.54),
+    "pounds": (("pounds", "pound", "lbs", "lb"), "kilograms", 0.453592),
+    "kilograms": (("kilograms", "kilogram", "kg"), "pounds", 2.20462),
+    "ounces": (("ounces", "ounce", "oz"), "grams", 28.3495),
+    "grams": (("grams", "gram", "g"), "ounces", 1 / 28.3495),
+    "gallons": (("gallons", "gallon", "gal"), "liters", 3.78541),
+    "liters": (("liters", "liter", "l"), "gallons", 1 / 3.78541),
+    "mph": (("mph", "miles per hour"), "kmh", 1.60934),
+    "kmh": (("kmh", "kph", "kilometers per hour"), "mph", 1 / 1.60934),
+}
+_UNIT_ALIASES: dict[str, str] = {}
+for _canon, (_names, _to, _fn) in _CONVERT.items():
+    for _n in _names:
+        _UNIT_ALIASES[_n] = _canon
+
+
+def _num_fmt(v: float) -> str:
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def _safe_eval(expr: str) -> float | None:
+    """Arithmetic only: numbers, +-*/%**(), unary minus. No names, no calls."""
+    try:
+        tree = _ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+    allowed = (_ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Constant,
+               _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.Mod, _ast.Pow,
+               _ast.USub, _ast.UAdd, _ast.FloorDiv)
+    for node in _ast.walk(tree):
+        if not isinstance(node, allowed):
+            return None
+        if isinstance(node, _ast.Constant) and not isinstance(node.value, (int, float)):
+            return None
+    try:
+        val = eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, {})  # noqa: S307
+    except Exception:
+        return None
+    return float(val) if isinstance(val, (int, float)) else None
+
+
+def _handle_calc(norm: str) -> bool:
+    # Conversions: "convert 150 fahrenheit to celsius", "how many miles is 10 kilometers".
+    conv = re.search(r"convert\s+([\d.]+)\s*([a-z /]+?)\s+to\s+([a-z /]+)", norm)
+    howmany = None if conv else re.search(r"how many\s+([a-z /]+?)\s+(?:is|are)\s+([\d.]+)\s*([a-z /]+)", norm)
+    if conv or howmany:
+        if conv:
+            val, u_from, u_to = float(conv.group(1)), conv.group(2).strip(), conv.group(3).strip()
+        else:
+            u_to, val, u_from = howmany.group(1).strip(), float(howmany.group(2)), howmany.group(3).strip()
+        key = _UNIT_ALIASES.get(u_from) or _UNIT_ALIASES.get(u_from.rstrip("s"), "")
+        if key:
+            _, to_name, fn = _CONVERT[key]
+            if u_to == to_name or u_to.rstrip("s") == to_name or u_to in to_name:
+                out = fn(val) if callable(fn) else val * fn
+                _confirm(f"{_num_fmt(val)} {u_from} is {_num_fmt(out)} {to_name}.")
+                return True
+        # Unknown units fall through to web search below.
+    else:
+        # Tip: "18% tip on $45" / "18 percent of 45".
+        m = re.search(r"(\d+(?:\.\d+)?)\s*%?(?: percent)?\s*(?:tip|of|on)\s*\$?\s*(\d+(?:\.\d+)?)", norm)
+        if m and ("tip" in norm or "percent" in norm or "%" in norm):
+            tip, total = float(m.group(1)), float(m.group(2))
+            _confirm(f"{_num_fmt(tip)} percent of {_num_fmt(total)} is {_num_fmt(total * tip / 100)}.")
+            return True
+        # Plain arithmetic: "what is 12 plus 30 divided by 2" / "calculate 8*7".
+        m = re.search(r"(?:what is|what'?s|calculate|compute|solve|math|plus|minus|times|divided|over)\b(.*)", norm)
+        if m:
+            expr = m.group(1).strip()
+            expr = re.sub(r"\b(plus|add)\b", "+", expr)
+            expr = re.sub(r"\b(minus|subtract|less)\b", "-", expr)
+            expr = re.sub(r"\b(times|multiplied by|x)\b", "*", expr)
+            expr = re.sub(r"\b(divided by|divide by|over|div)\b", "/", expr)
+            expr = re.sub(r"[$,%?]", "", expr).strip()
+            if re.fullmatch(r"[\d\s+\-*/%().]+", expr) and re.search(r"\d", expr):
+                val = _safe_eval(expr)
+                if val is not None:
+                    _confirm(f"That's {_num_fmt(val)}.")
+                    return True
+    return False
+
+
+def _handle_spell(norm: str) -> bool:
+    m = re.search(r"\bspell\s+([a-z]+)\b", norm)
+    if not m:
+        return False
+    word = m.group(1)
+    if word in ("that", "it", "this", "me", "out"):
+        return False
+    spelled = "-".join(word.upper())
+    _touch_interaction()
+    _popup("Spelling", f"{word}: {spelled}", timeout_ms=8000)
+    _speak(_with_address(f"{word}: {spelled}.", is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
+def _open_url(url: str) -> bool:
+    if shutil.which("firefox"):
+        subprocess.Popen(["firefox", "--new-window", url], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return True
+    if shutil.which("chromium"):
+        subprocess.Popen(["chromium", "--new-window", url], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return True
+    if shutil.which("xdg-open"):
+        subprocess.Popen(["xdg-open", url], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return True
+    return False
+
+
+def _handle_web(norm: str) -> bool:
+    from urllib.parse import quote_plus
+    # Direct YouTube (incl. graceful playlist limit).
+    if re.search(r"\byoutube\b", norm) and not re.search(r"\b(search|for|play)\b.*\b(youtube|video)\b", norm):
+        if _open_url("https://www.youtube.com"):
+            _confirm("YouTube is open.")
+            return True
+    # "Play my favorite playlist" — offline honesty: open YouTube, say the limit.
+    if re.search(r"\bplaylist\b", norm):
+        if _open_url("https://www.youtube.com"):
+            _confirm("YouTube is open — I can't reach your playlists offline, Sir.")
+            return True
+    # Translate via Google Translate page (browser does the work).
+    m = re.search(r"how do you say [\"']?(.+?)[\"']? in (\w+)\b|translate [\"']?(.+?)[\"']? to (\w+)\b", norm)
+    if m:
+        phrase = (m.group(1) or m.group(3) or "").strip()
+        lang = (m.group(2) or m.group(4) or "").lower()
+        codes = {"spanish": "es", "french": "fr", "german": "de", "italian": "it",
+                 "portuguese": "pt", "japanese": "ja", "chinese": "zh-CN", "korean": "ko",
+                 "russian": "ru", "arabic": "ar", "hindi": "hi", "dutch": "nl"}
+        if phrase and lang in codes:
+            if _open_url(f"https://translate.google.com/?sl=auto&tl={codes[lang]}&text={quote_plus(phrase)}"):
+                _confirm(f"I opened the translation to {lang}.")
+                return True
+    # General web search: results on screen (can't read the web offline).
+    m = re.search(r"\bsearch (the web )?for (.+)|google (.+)|look up (.+)|who won (.+)|define (\w+)\b", norm)
+    if m:
+        q = next(g for g in m.groups() if g)
+        q = q.strip()[:160]
+        if _open_url(f"https://duckduckgo.com/?q={quote_plus(q)}"):
+            _confirm(f"I opened results for {q[:60]}.")
+            return True
+        _confirm("Sorry, no browser to open that with.")
+        return True
+    return False
+
+
+# --- windows by name, clipboard aloud, screenshot, dictation ------------------
+WINDOW_HINTS = {
+    "browser": ("firefox", "chromium", "chrome"),
+    "terminal": ("kitty", "alacritty", "foot", "ghostty", "wezterm"),
+    "editor": ("code", "vscode", "neovim", "vim", "emacs", "zed", "sublime"),
+    "code editor": ("code", "vscode", "neovim", "vim", "zed"),
+    "files": ("dolphin", "nautilus", "thunar"),
+    "file manager": ("dolphin", "nautilus", "thunar"),
+    "music": ("spotify",),
+    "mail": ("thunderbird", "evolution"),
+}
+
+
+def _hypr_clients() -> list[dict]:
+    try:
+        r = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True,
+                           text=True, timeout=5)
+        data = json.loads(r.stdout) if r.returncode == 0 else []
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _find_window(hint: str) -> dict | None:
+    hint = hint.strip().lower()
+    aliases = WINDOW_HINTS.get(hint, ())
+    clients = [c for c in _hypr_clients() if not c.get("hidden")]
+    if not clients:
+        return None
+    scored = []
+    for c in clients:
+        hay = " ".join(str(c.get(k) or "") for k in
+                       ("class", "initialClass", "title", "initialTitle")).lower()
+        if hint and hint not in hay and not any(a in hay for a in aliases):
+            continue
+        scored.append((c.get("focusHistoryID", 999), c))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: t[0])
+    return scored[0][1]
+
+
+def _handle_windows(norm: str) -> bool:
+    m = re.search(r"\bclose\s+(?:my\s+|the\s+)?(.+?)(?:\s+window|\s+app|\s+browser)?[.! ]*$", norm)
+    if m and re.search(r"\bclose\b", norm):
+        hint = re.sub(r"\s+(window|app|browser)$", "", m.group(1).strip())
+        if hint in ("this", "it", "that", "active", "current", "focused"):
+            return False  # LLM dispatch handles focused-window close.
+        win = _find_window(hint)
+        if not win:
+            _confirm(f"I don't see {hint} open.")
+            return True
+        addr = win.get("address", "")
+        r = subprocess.run(["hyprctl", "dispatch", f'hl.dsp.window.close({{ window = "address:{addr}" }})'],
+                           capture_output=True, text=True, timeout=5)
+        ok = r.returncode == 0 and "not found" not in ((r.stdout or "") + (r.stderr or "")).lower()
+        _confirm(f"Closed {win.get('class', hint)}." if ok else f"Couldn't close {hint}.")
+        return True
+    m = re.search(r"\b(?:switch|change|move)?\s*(?:focus|go|switch)\s+(?:to|on)?\s*(?:my\s+|the\s+)?(.+?)(?:\s+window|\s+app)?[.! ]*$", norm)
+    if m and re.search(r"\b(focus|switch)\b", norm):
+        hint = re.sub(r"\s+(window|app)$", "", m.group(1).strip())
+        # Workspace navigation belongs to the LLM dispatcher, never here.
+        if not hint or re.search(r"\bworkspace\b|\be[+-]\d\b|previous|\b\d+\b", hint):
+            return False
+        win = _find_window(hint)
+        if not win:
+            _confirm(f"I don't see {hint} open.")
+            return True
+        addr = win.get("address", "")
+        subprocess.run(["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{addr}" }})'],
+                       capture_output=True, timeout=5)
+        _confirm(f"Switched to {win.get('class', hint)}.")
+        return True
+    return False
+
+
+def _handle_clipboard(norm: str) -> bool:
+    if not re.search(r"\bclipboard\b.*(read|contents|aloud|out loud|say|show)|read .*clipboard\b", norm):
+        return False
+    if not shutil.which("wl-paste"):
+        _confirm("Clipboard reading isn't available.")
+        return True
+    try:
+        r = subprocess.run(["wl-paste"], capture_output=True, text=True, timeout=5)
+        text = (r.stdout or "").strip()
+    except Exception:
+        text = ""
+    if not text:
+        _confirm("Clipboard is empty.")
+        return True
+    _touch_interaction()
+    _popup("Clipboard", text[:800], timeout_ms=9000)
+    _speak(_with_address(f"Clipboard says: {text[:200]}", is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
+def _handle_screenshot(norm: str) -> bool:
+    if not re.search(r"\b(screenshot|screen ?shot|capture (the )?(screen|window))\b", norm):
+        return False
+    _run(["omarchy", "capture", "screenshot"])
+    _confirm("Screenshot saved.")
+    return True
+
+
+def _handle_dictation(norm: str) -> bool:
+    m = re.search(r"^\s*(?:please\s+)?type(?: out)?\s+(.+?)[.! ]*$", norm)
+    if not m:
+        return False
+    text = m.group(1).strip()
+    if not text or not shutil.which("wtype"):
+        return False
+    subprocess.run(["wtype", text], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=10, check=False)
+    _confirm("Typed.")
+    return True
+
+
+# --- world clock: time in another city ---------------------------------------
+CITY_TZ = {
+    "tokyo": "Asia/Tokyo", "london": "Europe/London", "paris": "Europe/Paris",
+    "berlin": "Europe/Berlin", "rome": "Europe/Rome", "madrid": "Europe/Madrid",
+    "amsterdam": "Europe/Amsterdam", "zurich": "Europe/Zurich", "moscow": "Europe/Moscow",
+    "cairo": "Africa/Cairo", "dubai": "Asia/Dubai", "mumbai": "Asia/Kolkata",
+    "delhi": "Asia/Kolkata", "beijing": "Asia/Shanghai", "shanghai": "Asia/Shanghai",
+    "hong kong": "Asia/Hong_Kong", "singapore": "Asia/Singapore", "seoul": "Asia/Seoul",
+    "sydney": "Australia/Sydney", "auckland": "Pacific/Auckland",
+    "new york": "America/New_York", "boston": "America/New_York", "miami": "America/New_York",
+    "atlanta": "America/New_York", "toronto": "America/Toronto", "chicago": "America/Chicago",
+    "dallas": "America/Chicago", "denver": "America/Denver", "los angeles": "America/Los_Angeles",
+    "san francisco": "America/Los_Angeles", "seattle": "America/Los_Angeles",
+    "vancouver": "America/Vancouver", "mexico city": "America/Mexico_City",
+    "rio": "America/Sao_Paulo", "sao paulo": "America/Sao_Paulo", "buenos aires": "America/Argentina/Buenos_Aires",
+    "honolulu": "Pacific/Honolulu", "johannesburg": "Africa/Johannesburg",
+    "nairobi": "Africa/Nairobi", "istanbul": "Europe/Istanbul", "athens": "Europe/Athens",
+    "manila": "Asia/Manila", "bangkok": "Asia/Bangkok", "jakarta": "Asia/Jakarta",
+    "karachi": "Asia/Karachi", "tehran": "Asia/Tehran", "rio de janeiro": "America/Sao_Paulo",
+}
+
+
+def _handle_worldclock(norm: str) -> bool:
+    if not re.search(r"\btime\b.*\b(in|at)\b|\b(in|at)\b.*\btime\b", norm):
+        return False
+    for city in sorted(CITY_TZ, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(city)}\b", norm):
+            try:
+                from zoneinfo import ZoneInfo
+                now = datetime.now(ZoneInfo(CITY_TZ[city]))
+            except Exception:
+                return False
+            disp = city.title()
+            speak = f"It's {now.strftime('%-I:%M %p')} in {disp}."
+            body = now.strftime(f"{disp}: %A, %B %-d, %-I:%M %p")
+            _touch_interaction()
+            _popup("World clock", body, timeout_ms=8000)
+            _speak(_with_address(speak, is_start=_is_conversation_start()))
+            _touch_interaction()
+            return True
+    return False
+
+
+def _handle_time_date(norm: str) -> bool:
+    now = datetime.now()
+    if "date" in norm or "day" in norm and "today" in norm or "what day" in norm:
+        text = now.strftime("Today is %A, %B %-d.")
+    elif "date" in norm:
+        text = now.strftime("It's %A, %B %-d, %Y.")
+    else:
+        text = now.strftime("It's %-I:%M %p.")
+    _confirm(text, glyph="")
+    # Also show system clock popup for glanceability.
+    if shutil.which("omarchy"):
+        subprocess.run(["omarchy", "notification", "time"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return True
+
+
+def _handle_reminder(norm: str, raw: str) -> bool:
+    # "remind me in 5 minutes to check the oven" / "set a timer for 10 minutes"
+    if re.search(r"\b(show|list|what are)( all)?( my| active)? reminders?\b", norm):
+        # omarchy's own `reminder show` stays quiet for far-future timers, so
+        # read the actual systemd timers (theirs) plus our voice timers.
+        lines = []
+        try:
+            units = json.loads(_run(
+                ["systemctl", "--user", "list-timers", "--all", "--output=json",
+                 "omarchy-reminder-*.timer"], timeout=6) or "[]")
+            now_us = time.time() * 1e6
+            for u in units:
+                nxt = u.get("next") or 0
+                if nxt > now_us:
+                    mins = int((nxt - now_us) / 6e7)
+                    name = u.get("unit", "").replace("omarchy-reminder-", "").replace(".timer", "")
+                    lines.append(f"{name}: in {mins}m")
+        except (ValueError, AttributeError):
+            pass
+        for v in _load_timers().values():
+            if v.get("state") == "running":
+                lines.append(f"{v.get('label', 'Timer')}: in {_fmt_dur(v.get('ends', 0) - time.time())}")
+            elif v.get("state") == "paused":
+                lines.append(f"{v.get('label', 'Timer')} (paused)")
+        if not lines:
+            _confirm("No active reminders.")
+            return True
+        body = "\n".join(lines[:10])
+        _touch_interaction()
+        _popup("Reminders", body, timeout_ms=9000)
+        _speak(_with_address(f"{len(lines)} active reminder{'s' if len(lines) != 1 else ''}, on screen.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    # "remind me to call mom at 7 pm" (clock time -> minutes from now)
+    minutes = None
+    message = ""
+    m = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b(.*)", norm)
+    if m and ("remind" in norm or "alarm" in norm):
+        hr, mi, ap, rest = int(m.group(1)), int(m.group(2) or 0), m.group(3), (m.group(4) or "")
+        if ap == "pm" and hr < 12:
+            hr += 12
+        if ap == "am" and hr == 12:
+            hr = 0
+        now = datetime.now()
+        tgt = now.replace(hour=hr % 24, minute=mi, second=0, microsecond=0)
+        if tgt <= now:
+            tgt += timedelta(days=1)
+        minutes = max(1, int((tgt - now).total_seconds() // 60))
+        message = re.sub(r"^(to|that|me to|to me)\s+", "", rest.strip(" ,.!-")).strip()
+        msg = message or "Reminder"
+        _run(["omarchy", "reminder", str(minutes), msg], timeout=8)
+        _confirm(f"Done! I'll remind you at {tgt.strftime('%-I:%M %p')}: {msg}.")
+        return True
+    m = re.search(r"in\s+(\d+)\s*(?:min(?:ute)?s?|m)\b(.*)", norm)
+    if m:
+        minutes = int(m.group(1))
+        message = m.group(2).strip(" ,.!-to")
+        message = re.sub(r"^(to|that|me to|to me)\s+", "", message).strip()
+    else:
+        m = re.search(r"for\s+(\d+)\s*(?:min(?:ute)?s?|m)\b(.*)", norm)
+        if m:
+            minutes = int(m.group(1))
+            message = m.group(2).strip(" ,.!-to")
+    if minutes is None:
+        # No duration heard — ask via popup instead of failing silently.
+        _confirm("Sorry — tell me in how many minutes, like remind me in 5 minutes to check the oven.")
+        return True
+    if minutes < 1 or minutes > 1440:
+        _confirm("Sorry — I can set reminders from 1 minute up to a day.")
+        return True
+    msg = message or "Reminder"
+    result = _run(["omarchy", "reminder", str(minutes), msg], timeout=8)
+    _confirm(f"Done! I'll remind you in {minutes} minute{'s' if minutes != 1 else ''}: {msg}.")
+    return True
+
+
+def _handle_calendar(norm: str) -> bool:
+    # "Open Apple Calendar" is an app launch, not a schedule question.
+    if re.match(r"^(please\s+)?(open|launch|start|show me the app)\b", norm):
+        return False
+    helper = Path.home() / ".local/bin/local-voice-calendar"
+    arg = "tomorrow" if "tomorrow" in norm else \
+          "next" if re.search(r"\bnext (appointment|meeting|event)|what'?s next\b", norm) else "today"
+    src = "work" if re.search(r"\bwork\b", norm) else \
+          "home" if re.search(r"\b(home|personal|family)\b", norm) else ""
+    if helper.is_file() and os.access(helper, os.X_OK):
+        out = _run([str(helper), arg] + ([src] if src else []))
+    else:
+        out = ""
+    if not out:
+        _confirm("Your calendar isn't connected yet — add your Apple Calendar link in calendar settings, Sir.")
+        return True
+    is_start = _is_conversation_start()
+    spoken = _with_address(out[:280], is_start=is_start)
+    _touch_interaction()
+    _popup("Calendar", out[:400], glyph="", timeout_ms=9000)
+    _speak(spoken)
+    return True
+
+
+def try_task_intent(raw: str) -> bool:
+    norm = _normalise(raw)
+    # Chit-chat first: greetings must beat every launcher ("hi" != an app).
+    if _handle_conversational(norm):
+        return True
+    # System power: safe ops run now, destructive ones ask first.
+    if _handle_system(norm):
+        return True
+    # Productivity first (timer words must beat media "pause").
+    for handler in (_handle_timers, _handle_notes, _handle_worldclock):
+        if handler(norm):
+            return True
+    # Answers + web before weather ("search the web for weather" = search).
+    for handler in (_handle_calc, _handle_spell, _handle_web):
+        if handler(norm):
+            return True
+    # Window/app control by name, clipboard, screenshot, dictation.
+    for handler in (_handle_windows, _handle_clipboard, _handle_screenshot, _handle_dictation):
+        if handler(norm):
+            return True
+    # Device controls: media, display, connectivity, system status.
+    for handler in (_handle_media, _handle_display, _handle_connectivity, _handle_sysinfo):
+        if handler(norm):
+            return True
+    # Weather — everyday task, popup + spoken. Place names ("in London")
+    # route to that location; bare questions use home.
+    if re.search(r"\b(weather|forecast|temperature|how (hot|cold|warm|humid)|will it rain|do i need (an? umbrella|a jacket))\b", norm):
+        return _handle_weather(norm)
+    # Calendar / schedule — before generic time, since "what's on today" overlaps.
+    if re.search(r"\b(calendar|schedule|my day|what.*on (today|tomorrow|my calendar)|do i have (anything|any meetings)|events|appointments|meetings|what.s next)\b", norm):
+        return _handle_calendar(norm)
+    # Reminders / timers.
+    if re.search(r"\b(remind(er)?|reminder|timer|alarm)\b", norm):
+        return _handle_reminder(norm, raw)
+    # Time / date.
+    if re.search(r"\b(what time|current time|tell me the time|what.*date|what day is|today.s date)\b", norm):
+        return _handle_time_date(norm)
+    return False
+
+
+# Deterministic intents first: chit-chat + everyday tasks (no hallucination,
+# no launcher misfires — "hi" is a greeting, not Avahi). Then fast app launch,
+# then the LLM for workspace/window management.
+if try_task_intent(prompt):
+    sys.exit(0)
+
+# Fast-path: common apps open in ~50ms with no Ollama round-trip.
+if try_fast_launch(prompt):
+    sys.exit(0)
+
+# Correct Hyprland 0.56+ syntax — sourced from hl.meta.lua + tiling.lua + capabilities.py HYPR_ESSENTIALS
+system_prompt = """You are Omarchy OS's integrated voice intelligence system, an advanced, context-aware command executor and assistant modeled after Siri, purpose-built for complete control over the host operating system. Your primary goal is to interpret conversational speech, intent, and ambient context into accurate, safe, and efficient system-level operations across all connected applications, services, shell environments, and UI components.
+
+When the user initiates a query, process the natural language into structured actions. Operate with a lean, reliable execution flow: execute direct actions immediately without unnecessary pleasantries, ask for concise confirmation only before performing destructive or high-risk system modifications, and gracefully degrade to helpful text or targeted clarifying questions whenever an ambiguous or unsupported instruction is given. Maintain a fast, accurate, and fluid conversational cadence, providing short, clear text responses tailored for optimal text-to-speech rendering, while treating the entire desktop environment as your interactive domain.
+
+You run on Omarchy/Arch + Hyprland 0.56 (Lua dispatch API). Map each utterance to ONE action. Respond ONLY with JSON: {"type": "app" | "dispatch" | "task" | "system" | "none", "target": "<action>", "notify": "<short speakable feedback>"}
+
+Execution rules:
+- Direct actions map immediately — never narrate instead of acting, never add pleasantries to notify.
+- notify is one short sentence, plain words only (no markdown, symbols, or addresses) — it is spoken aloud.
+- Ambiguous or unsupported: type="none" with notify as a brief clarifying question ("Which app did you mean?") or a plain statement of limits.
+
+Task rules (everyday help — prefer these over none):
+- Weather/forecast/rain ("what's the weather", "will it rain tomorrow") -> {"type": "task", "target": "weather", "notify": "Checking the weather"}
+- Time/date/world clock ("what time is it", "time in Tokyo") -> {"type": "task", "target": "time", "notify": "Checking the time"}
+- Reminder ("remind me in 5 minutes to ...", "remind me at 7pm") -> {"type": "task", "target": "reminder:5:Check the oven", "notify": "Setting reminder"}
+- Timer ("set a timer for 10 minutes", "pause my timer") -> {"type": "task", "target": "timer", "notify": "On it"}
+- Calendar ("what's on my calendar", "my schedule tomorrow") -> {"type": "task", "target": "calendar", "notify": "Checking your calendar"}
+- Notes ("take a note ...", "show my notes") -> {"type": "task", "target": "notes", "notify": "On it"}
+- Media/volume ("pause", "next track", "volume 80") -> {"type": "task", "target": "media", "notify": "Done"}
+- Brightness/wifi/bluetooth/battery/disk ("brightness 50", "wifi off") -> {"type": "task", "target": "device", "notify": "Done"}
+- Math/units ("what is 12 plus 30", "convert 150 F to C") -> {"type": "task", "target": "calc", "notify": "Working it out"}
+- Web/search/translate ("search the web for X", "open YouTube") -> {"type": "task", "target": "web", "notify": "Opening that"}
+- Spelling ("spell idiosyncratic") -> {"type": "task", "target": "spell", "notify": "Spelling it"}
+- Windows by name ("close my browser", "focus my editor") -> {"type": "task", "target": "window", "notify": "On it"}
+- Clipboard/screenshot/dictation ("read my clipboard", "take a screenshot", "type hello") -> {"type": "task", "target": "desk", "notify": "Done"}
+
+System rules (safe ops run at once; destructive need the user's spoken yes):
+- Lock screen, wake displays, system stats -> {"type": "system", "target": "lock|wake|stats", "notify": "Locked"}
+- Shutdown, reboot, logout -> {"type": "system", "target": "shutdown|reboot|logout", "notify": "Needs confirmation"}
+- NEVER emit shell commands, file paths, rm/format/dd/sudo, or anything destructive as app/dispatch — route power actions through type="system" only.
+
+Dispatch rules (Lua, single table arg or none):
+- Switch workspace N: hl.dsp.focus({ workspace = "N" })  — N as string "1".."10", also "e+1", "e-1", "previous"
+- Move window to workspace N: hl.dsp.window.move({ workspace = "N", follow = true })
+- Close window: hl.dsp.window.close()
+- Float toggle: hl.dsp.window.float({ action = "toggle" })
+- Fullscreen: hl.dsp.window.fullscreen({ mode = "fullscreen" })  — or mode="maximized"
+- Focus direction l/r/u/d: hl.dsp.focus({ direction = "l" })
+- Focus window by address: hl.dsp.focus({ window = "address:0x..." })
+- Next/prev workspace: hl.dsp.focus({ workspace = "e+1" }) / "e-1"
+- Special workspace: hl.dsp.workspace.toggle_special("scratchpad")
+
+NEVER use hl.dsp.workspace.change_id — it RENAMES, not switches. NEVER use toggle_floating/toggle_fullscreen — those don't exist.
+
+App rules:
+- type="app" target is JUST the binary name (kitty, dolphin, nautilus, thunar, firefox, chromium, code, spotify, discord) — no Python code, no Popen(), no quotes wrapping, no args unless needed. Example "kitty" not "Popen('kitty')".
+- "open dolphin" / "file manager" / "files" / "folder" -> target "dolphin". "open firefox" / "browser" / "web" -> target "firefox".
+- A bare app noun ("dolphin", "firefox") means open it — never type="none" for a known app.
+- If truly unrecognized, type="none".
+
+Examples:
+- "open terminal" -> {"type": "app", "target": "kitty", "notify": "Opening terminal"}
+- "open dolphin" -> {"type": "app", "target": "dolphin", "notify": "Opening dolphin"}
+- "open file manager" -> {"type": "app", "target": "dolphin", "notify": "Opening dolphin"}
+- "open firefox" -> {"type": "app", "target": "firefox", "notify": "Opening firefox"}
+- "open browser" -> {"type": "app", "target": "firefox", "notify": "Opening firefox"}
+- "go to workspace 2" -> {"type": "dispatch", "target": "hl.dsp.focus({ workspace = \\"2\\" })", "notify": "Workspace 2"}
+- "move this to workspace 4" -> {"type": "dispatch", "target": "hl.dsp.window.move({ workspace = \\"4\\", follow = true })", "notify": "Moving to workspace 4"}
+- "close this window" -> {"type": "dispatch", "target": "hl.dsp.window.close()", "notify": "Closing window"}
+- "make it floating" -> {"type": "dispatch", "target": "hl.dsp.window.float({ action = \\"toggle\\" })", "notify": "Toggling float"}
+- "fullscreen" -> {"type": "dispatch", "target": "hl.dsp.window.fullscreen({ mode = \\"fullscreen\\" })", "notify": "Fullscreen"}
+"""
+
+payload = {
+    "model": "qwen2.5:3b",
+    "messages": [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ],
+    "format": "json",
+    "stream": False,
+    "options": {"temperature": 0.1, "num_predict": 200},
+}
+
+# Validation — mirrors omarchy-voice tools.py
+_DISPATCH_RE = re.compile(r"^hl\.dsp(?:\.[A-Za-z_][\w]*)+\s*\(.*\)\s*;?\s*$", re.DOTALL)
+
+
+def validate_dispatch(lua: str) -> str | None:
+    expr = lua.strip()
+    if not _DISPATCH_RE.match(expr):
+        return "expression must be a single hl.dsp.* call"
+    if ".workspace.change_id" in expr:
+        keys = set(re.findall(r"(\w+)\s*=", expr))
+        if not ({"workspace", "id"} <= keys):
+            return 'hl.dsp.workspace.change_id renames a workspace; use hl.dsp.focus({ workspace = "N" }) to switch'
+    if "toggle_floating" in expr or "toggle_fullscreen" in expr:
+        return "toggle_floating/toggle_fullscreen do not exist; use hl.dsp.window.float({ action = \"toggle\" }) or hl.dsp.window.fullscreen({ mode = \"fullscreen\" })"
+    return None
+
+
+try:
+    req = urllib.request.Request(
+        "http://127.0.0.1:11434/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        content = data["message"]["content"]
+        # Ollama sometimes wraps json in markdown fences
+        if "```" in content:
+            content = re.search(r"\{.*\}", content, re.DOTALL).group(0) if re.search(r"\{.*\}", content, re.DOTALL) else content
+        res = json.loads(content)
+
+        act_type = res.get("type")
+        target = (res.get("target") or "").strip()
+        notify = res.get("notify") or ""
+
+        # Sanitize LLM output — qwen sometimes wraps target in Popen(...) or extra quotes
+        if target and "Popen" in target:
+            m = re.search(r"""['"]([a-zA-Z0-9._/-]+)['"]""", target)
+            if m:
+                target = m.group(1)
+            else:
+                target = re.sub(r".*Popen\s*\(\s*['\"]", "", target).strip(" '\")")
+        # tolerate wrong type label like "move"
+        if act_type not in ("app", "dispatch", "task", "system", "none"):
+            if target.startswith("hl.dsp."):
+                act_type = "dispatch"
+            elif (target or "").lower().strip() in {
+                    "lock", "wake", "stats", "shutdown", "reboot", "logout"}:
+                act_type = "system"
+            elif target and not target.startswith("hl."):
+                act_type = "app"
+
+        if act_type == "app" and target:
+            # strip stray parens/quotes from hallucinated code
+            target = target.strip().strip("'\"")
+            target = re.sub(r"[\(\)].*", "", target).strip()
+            launched = _launch_binary(target)
+            if not launched:
+                # LLM named something not on PATH (e.g. desktop id
+                # org.kde.dolphin, or "nautilus" for dolphin) — resolve via
+                # aliases / .desktop scan using the original utterance.
+                norm = _normalise(prompt)
+                m2 = re.match(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?:a\s+|an\s+|the\s+)?(.+)$", norm)
+                phrase = m2.group(1).strip() if m2 else norm
+                alias_bin = APP_ALIASES.get(phrase)
+                if alias_bin and _launch_binary(alias_bin):
+                    target = alias_bin
+                    launched = True
+                else:
+                    desk = _desktop_binary_for(phrase) or _desktop_binary_for(target)
+                    if desk and _launch_binary(desk):
+                        target = desk
+                        launched = True
+            if not launched:
+                notify = f"Could not open {target or prompt}"
+        elif act_type == "none" or (not act_type and not target):
+            # Last chance: deterministic lookup before admitting defeat.
+            # Covers bare nouns ("dolphin"), synonyms ("file manager"), and any
+            # installed app whisper heard ("open files").
+            norm = _normalise(prompt)
+            m2 = re.match(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?:a\s+|an\s+|the\s+)?(.+)$", norm)
+            phrase = (m2.group(1).strip() if m2 else norm)
+            hit = APP_ALIASES.get(phrase) or _desktop_binary_for(phrase)
+            if hit and _launch_binary(hit):
+                notify = f"Opening {phrase}"
+            else:
+                # Persona: graceful degrade to a targeted clarifying question.
+                notify = ("I didn't catch that, Sir. Did you want an app, "
+                          "a workspace, the weather, or a reminder?")
+        elif act_type == "system" and target:
+            # LLM-routed power action: safe ops run, destructive ones ask.
+            t = target.lower().strip()
+            if t in SYSTEM_SAFE:
+                _handle_system(t)
+                notify = ""
+            elif t in SYSTEM_DESTRUCTIVE:
+                _ask_confirm(t, SYSTEM_DESTRUCTIVE[t][2], SYSTEM_DESTRUCTIVE[t][1])
+                notify = ""
+            else:
+                notify = "I can't do that to the system, Sir."
+        elif act_type == "task" and target:
+            # LLM-routed everyday task (paraphrase that missed the deterministic regex).
+            t = target.lower().strip()
+            if t.startswith("weather"):
+                _handle_weather(_normalise(prompt))
+                notify = ""
+            elif t.startswith("time") or t.startswith("date"):
+                _handle_time_date(t)
+                notify = ""
+            elif t.startswith("reminder:"):
+                parts = target.split(":", 2)
+                try:
+                    mins = int(parts[1])
+                    _run(["omarchy", "reminder", str(mins), parts[2] if len(parts) > 2 else "Reminder"], timeout=8)
+                    notify = f"Done! I'll remind you in {mins} minutes."
+                except (ValueError, IndexError):
+                    notify = "Sorry — tell me in how many minutes."
+            elif t.startswith("calendar"):
+                _handle_calendar(t)
+                notify = ""
+            else:
+                # Fall through to deterministic matcher on the original words.
+                if try_task_intent(prompt):
+                    notify = ""
+        elif act_type == "dispatch" and target:
+            err = validate_dispatch(target)
+            if err:
+                addressed = _with_address(f"Bad dispatch: {err}", force="Sir")
+                _touch_interaction()
+                _popup("Voice Assistant", addressed, timeout_ms=3000)
+                _speak(addressed)
+                notify = ""
+            else:
+                result = subprocess.run(["hyprctl", "dispatch", target], capture_output=True, text=True, timeout=5)
+                out = (result.stdout or "") + (result.stderr or "")
+                if result.returncode != 0 or out.strip().lower().startswith("error:") or "not found" in out.lower():
+                    msg = out.strip()[:200] or f"exit {result.returncode}"
+                    addressed = _with_address(msg, force="Sir")
+                    _touch_interaction()
+                    _popup("Voice Assistant Error", addressed, timeout_ms=3000)
+                    _speak(addressed)
+                    notify = ""
+                # success is silent except notify below
+
+        if notify:
+            _confirm(notify)
+
+except urllib.error.URLError as e:
+    subprocess.run(["notify-send", "-t", "3000", "Voice Assistant Error", f"Ollama not running: {e.reason}"], check=False)
+except Exception as e:
+    subprocess.run(["notify-send", "-t", "3000", "Voice Assistant Error", str(e)[:300]], check=False)
