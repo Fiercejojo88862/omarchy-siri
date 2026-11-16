@@ -23,8 +23,7 @@ INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
 * `bin/local-voice-tts` / `local-voice-say` — Siri voice: Piper `en_GB-southern_english_female-low` (offline, sub-second, mastered to 48k/24-bit)
 * `bin/local-voice-calendar` — merged iCloud home+work feeds (today/tomorrow/next)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
-* `hypr/bindings-voice.lua` — one-line keybinding
-* `patches/apply-patches.py` — CPU-only fixes for stock coqui-tts
+* `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
 * `config/*.example` — calendar + persona templates
 
 ## 🚀 Install

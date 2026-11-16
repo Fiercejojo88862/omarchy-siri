@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Siri of Omarchy installer: scripts + voice models + desktop entry + patches.
+# Siri of Omarchy installer: scripts + voice models + desktop entry.
 # Safe to re-run. Never touches your recordings; models download on demand.
 set -euo pipefail
 
@@ -20,7 +20,7 @@ done
 # --- 1. Scripts -----------------------------------------------------------------
 mkdir -p "$BIN"
 for f in local-voice local-voice-exec local-voice-tts local-voice-say \
-         local-voice-clone local-voice-calendar apple-calendar apple-calendar-set-icon; do
+         local-voice-calendar apple-calendar apple-calendar-set-icon; do
     ln -sf "$REPO/bin/$f" "$BIN/$f"
     chmod +x "$REPO/bin/$f"
 done

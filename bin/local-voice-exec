@@ -245,10 +245,8 @@ def _speak(text: str) -> None:
     # Quiet mode: popups confirm silently, TTS stays muted.
     if _quiet_active():
         return
-    # Via local-voice-say: cached clone audio plays instantly in her voice;
-    # unheard phrases speak the fast fallback NOW while the clone generates
-    # in the background for next time. Never call local-voice-tts directly
-    # here — that would bypass her voice entirely.
+    # Via local-voice-say (Piper, offline, sub-second). Fire-and-forget: the
+    # player is detached so synthesis never blocks the router or Hyprland.
     try:
         subprocess.Popen(
             [str(Path.home() / ".local/bin/local-voice-say"), text],
@@ -2054,9 +2052,8 @@ def _computer_describe() -> bool:
         body += "\nControls: " + ", ".join(ctl_names)
     _touch_interaction()
     _popup("Desktop", body[:900], timeout_ms=9000)
-    # Fixed phrase: dynamic screen contents never hit the voice cache, so
-    # speaking them would use the fallback voice every time (and burn ~30s
-    # of clone CPU per hearing). Details stay on screen; speech stays hers.
+    # Fixed spoken line: the popup carries the dynamic screen contents, so the
+    # speech stays short and consistent instead of reading a window list aloud.
     _speak(_with_address("Here's what's on screen.",
                          is_start=_is_conversation_start()))
     _touch_interaction()
@@ -2078,14 +2075,11 @@ def _computer_click(name: str) -> bool:
                              is_start=_is_conversation_start()))
         _touch_interaction()
         return True
-    # Fixed phrase (see describe): the control name goes in the popup so
-    # speech stays a cache hit in her own voice.
+    # Fixed phrase (see describe): the control name goes in the popup.
     _touch_interaction()
     _popup("Click", f"Clicked {name[:60]}.", timeout_ms=6000)
     _speak(_with_address("Clicked.", is_start=_is_conversation_start()))
     _touch_interaction()
-    return True
-    _confirm(f"Clicked {name[:60]}.")
     return True
 
 
@@ -2290,7 +2284,7 @@ def _handle_worldclock(norm: str) -> bool:
 
 def _handle_time_date(norm: str) -> bool:
     now = datetime.now()
-    if "date" in norm or "day" in norm and "today" in norm or "what day" in norm:
+    if "what day" in norm or ("day" in norm and "today" in norm):
         text = now.strftime("Today is %A, %B %-d.")
     elif "date" in norm:
         text = now.strftime("It's %A, %B %-d, %Y.")
