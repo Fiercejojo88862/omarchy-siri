@@ -30,6 +30,39 @@ try:
 except OSError:
     pass
 
+CONFIG_DIR = Path.home() / ".config/voice-assistant"
+CONFIG_EXAMPLES = Path(__file__).resolve().parent.parent / "config"
+
+
+def init_config() -> int:
+    """Write any missing config file from the shipped example, mode 600.
+
+    Idempotent and non-destructive: an existing file is never touched, so
+    running install.sh (or this) after an update cannot clobber your links,
+    persona or API key.
+    """
+    wrote, kept = [], []
+    for name in ("persona.conf", "calendar.conf", "weather.conf"):
+        dst = CONFIG_DIR / name
+        if dst.exists():
+            kept.append(name)
+            continue
+        example = CONFIG_EXAMPLES / (name + ".example")
+        if not example.is_file():
+            continue
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(example, dst)
+        dst.chmod(0o600)
+        wrote.append(name)
+    print("wrote: " + (", ".join(wrote) or "nothing"))
+    if kept:
+        print("kept:  " + ", ".join(kept))
+    return 0
+
+
+if prompt == "--init-config":
+    sys.exit(init_config())
+
 # --- deterministic app resolution (fast-path, no LLM) -----------------------
 # Whisper often returns a bare noun ("dolphin") or a phrase the LLM was never
 # taught ("open files"). Resolve those locally so common apps open instantly
@@ -91,34 +124,55 @@ XDG_APP_DIRS = (
 
 
 # --- Siri of Omarchy persona: selective addressing ---------------------------
-# Honorifics (e.g. Sir) sound only at conversation start (>180s idle) and
-# when needed (errors, confirmations). Never every reply.
+# Honorifics (e.g. Sir) sound only at conversation start (after a silence of
+# HONORIFIC_IDLE_SECONDS) and, if HONORIFIC_ON_ERRORS is on, on corrections and
+# spoken confirmations. Never every reply.
 # Personalize in ~/.config/voice-assistant/persona.conf:
 #   HONORIFICS=Sir,Madam
-# Default when unconfigured is neutral ("Sir").
+#   HONORIFIC_IDLE_SECONDS=180
+#   HONORIFIC_ON_ERRORS=1
+# Default when unconfigured is neutral ("Sir", 180s, on).
 STATE_DIR = Path.home() / ".local/state/voice-assistant"
-PERSONA_CONF = Path.home() / ".config/voice-assistant/persona.conf"
+PERSONA_CONF = CONFIG_DIR / "persona.conf"
 LAST_FILE = STATE_DIR / "last_interaction"
-IDLE_SECONDS = 180
+_DEFAULT_HONORIFICS = ("Sir",)
+_DEFAULT_IDLE_SECONDS = 180.0
 
 
-def _honorifics() -> tuple[str, ...]:
+def _persona_conf() -> dict:
+    """Persona knobs from persona.conf; every value falls back to the default."""
+    conf = {"honorifics": _DEFAULT_HONORIFICS,
+            "idle": _DEFAULT_IDLE_SECONDS,
+            "on_errors": True}
+    values: dict[str, str] = {}
     try:
         for line in PERSONA_CONF.read_text().splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, val = line.partition("=")
-            if key.strip().upper() == "HONORIFICS":
-                names = tuple(n.strip() for n in val.split(",") if n.strip())
-                if names:
-                    return names
+            values[key.strip().upper()] = val.strip()
     except OSError:
+        return conf
+    names = tuple(n.strip() for n in values.get("HONORIFICS", "").split(",") if n.strip())
+    if values.get("HONORIFICS", "").strip().lower() in ("none", "off", "no"):
+        conf["honorifics"] = ()   # explicit opt-out: never address
+    elif names:
+        conf["honorifics"] = names
+    try:
+        idle = float(values.get("HONORIFIC_IDLE_SECONDS", ""))
+        if 30.0 <= idle <= 3600.0:
+            conf["idle"] = idle
+    except ValueError:
         pass
-    return ("Sir",)
+    if values.get("HONORIFIC_ON_ERRORS", "").strip().lower() in ("0", "false", "no", "off"):
+        conf["on_errors"] = False
+    return conf
 
 
-_HONORIFICS_START = _honorifics()
+_PERSONA = _persona_conf()
+_HONORIFICS_START = _PERSONA["honorifics"]
+IDLE_SECONDS = _PERSONA["idle"]
 
 
 def _touch_interaction() -> None:
@@ -139,6 +193,8 @@ def _is_conversation_start() -> bool:
 
 def _start_honorific() -> str:
     # Rotate deterministically by day so it feels natural, not random.
+    if not _HONORIFICS_START:
+        return ""
     try:
         day = int(time.time() // 86400)
         return _HONORIFICS_START[day % len(_HONORIFICS_START)]
@@ -147,16 +203,26 @@ def _start_honorific() -> str:
 
 
 def _with_address(text: str, *, force: str = "", is_start: bool = False) -> str:
-    """Prepend honorific only when starting or when needed (force='Sir')."""
+    """Prepend honorific only when starting, or when configured for errors."""
     if force:
-        return f"{force}, {text}" if text else force
+        # Callers pass a truthy label ("Sir"); the configured pool wins, so a
+        # custom HONORIFICS applies to corrections and confirmations too.
+        if not _PERSONA["on_errors"]:
+            return text
+        name = _start_honorific()
+        return f"{name}, {text}" if name and text else (name or text)
     if is_start:
-        return f"{_start_honorific()}, {text}" if text else _start_honorific()
+        name = _start_honorific()
+        return f"{name}, {text}" if name and text else (name or text)
     return text
 
 
 def _popup(headline: str, body: str = "", glyph: str = "", timeout_ms: int = 8000) -> None:
     """Written response in a popup. Prefers omarchy-notification-send, falls back to notify-send."""
+    if os.environ.get("VOICE_ECHO"):
+        print(f"POPUP\t{headline}\t{body}", file=sys.stderr)
+    if os.environ.get("VOICE_DRYRUN"):
+        return
     if shutil.which("omarchy-notification-send"):
         cmd = ["omarchy-notification-send", "-u", "low", "-t", str(timeout_ms)]
         if glyph:
@@ -244,6 +310,12 @@ def _clear_quiet() -> None:
 def _speak(text: str) -> None:
     # Quiet mode: popups confirm silently, TTS stays muted.
     if _quiet_active():
+        return
+    # VOICE_ECHO prints what would be said (used by --selftest and benchmarks);
+    # VOICE_DRYRUN additionally stops the audio so tests stay silent.
+    if os.environ.get("VOICE_ECHO"):
+        print(f"SPEAK\t{text}", file=sys.stderr)
+    if os.environ.get("VOICE_DRYRUN"):
         return
     # Via local-voice-say (Piper, offline, sub-second). Fire-and-forget: the
     # player is detached so synthesis never blocks the router or Hyprland.

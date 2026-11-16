@@ -1,0 +1,10 @@
+# Weather — copy to ~/.config/voice-assistant/weather.conf (chmod 600)
+#
+# AccuWeather is OPTIONAL. Leave the key empty and weather stays on the
+# built-in wttr.in path (current conditions + 3-day forecast, no key needed).
+# A free key from https://developer.accuweather.com unlocks the 12-hour
+# outdoor-analytics view: RealFeel, humidity/wind/UV, rain peak and the best
+# outdoor window, plus activity indices (run, bike, golf, dog walk...).
+ACCUWEATHER_API_KEY=
+# Default place for the key path (a city name AccuWeather can search).
+ACCU_LOCATION=Matawan

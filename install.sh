@@ -59,19 +59,11 @@ info "Piper voices present."
 
 # --- 5. Config templates (never overwrite yours) --------------------------------------
 mkdir -p "$CONF"
-[[ -f "$CONF/calendar.conf" ]] || cp "$REPO/config/calendar.conf.example" "$CONF/calendar.conf"
-[[ -f "$CONF/persona.conf" ]] || cp "$REPO/config/persona.conf.example" "$CONF/persona.conf"
-if [[ ! -f "$CONF/weather.conf" ]]; then
-    cat > "$CONF/weather.conf" <<'EOF'
-# AccuWeather (optional): free key from developer.accuweather.com unlocks
-# AccuWeather current + 12h outdoor analytics + activity indices.
-# Without it, weather stays on the built-in wttr.in path.
-ACCUWEATHER_API_KEY=
-ACCU_LOCATION=Matawan
-EOF
-fi
-chmod 600 "$CONF/calendar.conf" "$CONF/weather.conf" 2>/dev/null || true
-info "Config templates in $CONF (edit calendar.conf with your iCloud links)."
+for f in calendar persona weather; do
+    [[ -f "$CONF/$f.conf" ]] || cp "$REPO/config/$f.conf.example" "$CONF/$f.conf"
+done
+chmod 600 "$CONF"/*.conf 2>/dev/null || true
+info "Config templates in $CONF (calendar links, persona, optional AccuWeather key)."
 
 # --- 6. Apple Calendar desktop entry ---------------------------------------------------
 DESKTOP="$HOME/.local/share/applications/apple-calendar.desktop"

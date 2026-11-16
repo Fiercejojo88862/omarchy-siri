@@ -1,4 +1,18 @@
 # Siri addressing — copy to ~/.config/voice-assistant/persona.conf
-# Honorifics rotate daily and sound only at conversation start (>180s idle)
-# and when needed (errors, confirmations). Default when absent: Sir.
+# Applied on the next command; no restart needed. Defaults shown below.
+#
+# HONORIFICS: comma-separated pool. Only the first is used unless you add more,
+#             in which case they rotate by day so it never sounds mechanical.
+#             Use HONORIFICS=none to drop addressing entirely.
+#             Default when absent: Sir
 HONORIFICS=Sir
+
+# HONORIFIC_IDLE_SECONDS: how long a silence starts a "new conversation".
+#             Addressing is reserved for the first reply after this gap, so she
+#             does not say "Sir" on every sentence. 30..3600. Default: 180
+HONORIFIC_IDLE_SECONDS=180
+
+# HONORIFIC_ON_ERRORS: 1 = prefix corrections and spoken confirmations with the
+#             honorific ("Sir, I couldn't reach the forecast"). 0 = say them
+#             plainly. Default: 1
+HONORIFIC_ON_ERRORS=1
