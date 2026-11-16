@@ -1,24 +1,26 @@
 # 🎙️ Siri of Omarchy
 
-Offline push-to-talk voice assistant for Hyprland (Omarchy/Arch). Press **INS** to talk, press again to send — she transcribes locally, routes intent through a local LLM, and acts: apps, workspaces, windows, weather, timers, reminders, calendar, system controls — all confirmed aloud in a cloned British voice.
+Offline push-to-talk voice assistant for Hyprland (Omarchy/Arch). Press **INS** to talk, press again to send — she transcribes locally, routes intent through a local LLM, and acts: apps, workspaces, windows, weather, timers, reminders, calendar, system controls — all confirmed aloud in a British female voice.
 
-> **Topics:** `hyprland` `voice-assistant` `offline` `whisper` `ollama` `xtts` `arch-linux` `omarchy`
+> **Topics:** `hyprland` `voice-assistant` `offline` `whisper` `ollama` `piper` `arch-linux` `omarchy`
 
 ## 🧠 How it works
 
 ```text
 INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
        ──▶ Ollama qwen2.5:3b (intent → JSON) ──▶ hyprctl dispatch (Lua) / apps
-       ──▶ popup + XTTS-v2 clone speaks the confirmation
+       ──▶ popup + Piper southern-English female speaks the confirmation
 ```
 
-100% local except the optional Edge-TTS fallback voice (online). No audio leaves the machine on the default path.
+100% local, 100% offline. No audio leaves the machine.
 
 ## 📦 What's included
 
 * `bin/local-voice` — toggle recorder (start/stop, instant, detached fds)
 * `bin/local-voice-exec` — Ollama intent router (apps, Hyprland 0.56 `hl.dsp.*`, tasks, gated power actions, conversational)
-* `bin/local-voice-tts` / `local-voice-say` / `local-voice-clone` — cloned-voice speech with disk cache (repeats play instantly)
+* `bin/local-voice-exec` — computer-use via hypruse: "what do you see", "click Save", "scroll down", "press Escape", "type X and press enter", "open firefox on workspace 3"
+* Chitchat: rotating jokes ("tell me a joke"), fun facts, and friendly answers (compliments, favorites, "will you marry me") — all offline, all in her voice
+* `bin/local-voice-tts` / `local-voice-say` — Siri voice: Piper `en_GB-southern_english_female-low` (offline, sub-second, mastered to 48k/24-bit)
 * `bin/local-voice-calendar` — merged iCloud home+work feeds (today/tomorrow/next)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
 * `hypr/bindings-voice.lua` — one-line keybinding
@@ -34,7 +36,22 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Needs: Hyprland 0.56+, `whisper-cli`, `ollama` (+`qwen2.5:3b` pulled separately), PipeWire, ffmpeg, Python 3.10+. First run downloads XTTS-v2 (~2GB, CPML non-commercial license).
+Needs: Hyprland 0.56+, `whisper-cli`, `ollama` (+`qwen2.5:3b` pulled separately), PipeWire, ffmpeg, Python 3.10+, Piper voices (~30MB, fetched by `install.sh`). Computer-use needs `hypruse` (`pip install --user hypruse`, handled by `install.sh`; check with `uvx hypruse doctor`).
+
+## 🖱️ Computer use
+
+Hyprland-native desktop control through hypruse (no root, no ydotool, no portals — same Wayland protocols as `wlrctl`). Semantic first: she reads the window tree + named controls, never guessed pixels.
+
+| Say | Does |
+|---|---|
+| *"what do you see" / "what's open"* | lists windows + focused app's clickable controls |
+| *"click Save" / "press Login"* | clicks the named control (`click_ui`) |
+| *"scroll down / up"* | scrolls at the cursor |
+| *"press Escape / Control S"* | key combo via `wtype` path |
+| *"type hello and press enter"* | types, then Enter |
+| *"open firefox on workspace 3"* | launches placed on that workspace |
+
+Safety: locked sessions, password fields and system auth dialogs always refuse (`allow_auth` is never passed). Panic key: `SUPER+SHIFT+Backspace` → `pkill -f hypruse`. Read-only rehearsal: `HYPRUSE_DRYRUN=1`; audit log: `HYPRUSE_JOURNAL=1`.
 
 Add the keybinding to `~/.config/hypr/bindings.lua`, then `hyprctl reload`:
 
@@ -42,15 +59,9 @@ Add the keybinding to `~/.config/hypr/bindings.lua`, then `hyprctl reload`:
 o.bind("Insert", "Voice: talk / send", "local-voice toggle")
 ```
 
-## 🗣️ Clone your voice
+## 🔊 Voice
 
-Record ~25 seconds of clean speech (mono WAV), save as:
-
-```text
-~/.local/share/voice-clone/siri_ref_25s.wav
-```
-
-First hearing of each phrase takes ~25s on CPU (backgrounded, never blocks); repeats play instantly from `~/.local/share/voice-clone/cache/`. **Never commit recordings** — voice is biometric (`.gitignore` blocks `*.wav/*.mp3`).
+Siri speaks with Piper `en_GB-southern_english_female-low` — stock British female voice pitch-matched to your recording (median F0/range overlap beat jenny, cori and alba on identical text). Fully offline, sub-second replies, no warm-up, no background jobs. Other British female options already on disk: `en_GB-jenny_dioco-medium`, `en_GB-cori-high`, `en_GB-alba-medium` — point `VOICE_MODEL` at one in `bin/local-voice-tts` to switch.
 
 ## 📅 Calendar
 
@@ -62,4 +73,4 @@ Copy `config/calendar.conf.example` to `~/.config/voice-assistant/calendar.conf`
 
 ## 📄 License
 
-MIT (repo code). XTTS-v2 model is CPML (free non-commercial); whisper.cpp MIT; Piper MIT.
+MIT (repo code). Piper voices MIT; whisper.cpp MIT.

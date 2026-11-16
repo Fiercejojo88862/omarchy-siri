@@ -52,6 +52,23 @@ APP_ALIASES = {
     "visual studio": "code",
     "spotify": "spotify",
     "discord": "discord",
+    "gimp": "gimp-3.2",
+    "image editor": "gimp-3.2",
+    "photoshop": "gimp-3.2",
+    "obsidian": "obsidian",
+    "notes app": "obsidian",
+    "filezilla": "filezilla",
+    "ftp": "filezilla",
+    "vlc": "vlc",
+    "video player": "vlc",
+    "media player": "vlc",
+    "onlyoffice": "onlyoffice-desktopeditors",
+    "office": "onlyoffice-desktopeditors",
+    "word": "onlyoffice-desktopeditors",
+    "prusa": "prusa-slicer",
+    "prusaslicer": "prusa-slicer",
+    "slicer": "prusa-slicer",
+    "blender": "blender",
     "apple calendar": "apple-calendar",
     "calendar app": "apple-calendar",
 }
@@ -148,10 +165,83 @@ def _popup(headline: str, body: str = "", glyph: str = "", timeout_ms: int = 800
     subprocess.run(args, check=False)
 
 
+# --- mood engine: sentiment tracking + quiet mode -----------------------------
+# Every utterance is mood-scored (frustrated > sarcastic > focus > casual).
+# The mood tints the LLM fallback and selects persona replies below.
+# Quiet mode ("stop talking, just do it") mutes TTS for 10 minutes —
+# popups keep confirming silently.
+MOOD_FILE = STATE_DIR / "mood.json"
+QUIET_FILE = STATE_DIR / "quiet_until"
+MOOD_TTL = 900
+QUIET_SECS = 600
+
+
+def _get_mood() -> str:
+    try:
+        data = json.loads(MOOD_FILE.read_text())
+        if isinstance(data, dict) and time.time() < float(data.get("exp", 0)):
+            return str(data.get("mood", "casual"))
+    except (OSError, ValueError):
+        pass
+    return "casual"
+
+
+def _set_mood(mood: str) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        MOOD_FILE.write_text(json.dumps({"mood": mood, "exp": time.time() + MOOD_TTL}))
+    except OSError:
+        pass
+
+
+def _detect_mood(norm: str) -> str:
+    if re.search(r"\b(hell|damn|shit|fuck|crap|garbage|useless|stupid|idiot|dumb|sucks|"
+                 r"suck|hate|broken?|crashed?|annoying|trash|worst|rage|angry|pissed)\b", norm):
+        _set_mood("frustrated")
+        return "frustrated"
+    if re.search(r"take ?over|plotting|skynet|better than|yeah right|whatever you say", norm):
+        _set_mood("sarcastic")
+        return "sarcastic"
+    if re.search(r"\b(node|express|async|debug|unity|build|database|mysql|code|coding|"
+                 r"study|exam|class|assignment|script|function|compile|webgl|it20[12])\b", norm):
+        _set_mood("focus")
+        return "focus"
+    return _get_mood()
+
+
+def _quiet_active() -> bool:
+    try:
+        return time.time() < float(QUIET_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+
+
+def _set_quiet() -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        QUIET_FILE.write_text(str(time.time() + QUIET_SECS))
+    except OSError:
+        pass
+
+
+def _clear_quiet() -> None:
+    try:
+        QUIET_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _speak(text: str) -> None:
+    # Quiet mode: popups confirm silently, TTS stays muted.
+    if _quiet_active():
+        return
+    # Via local-voice-say: cached clone audio plays instantly in her voice;
+    # unheard phrases speak the fast fallback NOW while the clone generates
+    # in the background for next time. Never call local-voice-tts directly
+    # here — that would bypass her voice entirely.
     try:
         subprocess.Popen(
-            [str(Path.home() / ".local/bin/local-voice-tts"), text],
+            [str(Path.home() / ".local/bin/local-voice-say"), text],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -187,12 +277,17 @@ def _launch_binary(binary: str) -> bool:
         return False
 
 
-def _desktop_binary_for(query: str) -> str | None:
-    """Find a launchable binary by scanning .desktop Name/Exec (mirrors tools.py lookup)."""
+def _desktop_argv_for(query: str) -> list[str] | None:
+    """Full launch argv for a spoken app name, or None.
+
+    Unlike the basename lookup, this keeps URL arguments intact so Omarchy
+    webapps (`Exec=omarchy-launch-browser https://…`) open the right page
+    instead of a bare browser window.
+    """
     q = query.lower().strip()
     if not q:
         return None
-    best: str | None = None
+    best: list[str] | None = None
     for directory in XDG_APP_DIRS:
         if not directory.is_dir():
             continue
@@ -211,21 +306,49 @@ def _desktop_binary_for(query: str) -> str | None:
                     exec_line = line[5:].strip()
             if not name or not exec_line:
                 continue
-            # Exact Name match wins (e.g. "Dolphin"), then whole-word match.
-            # Plain substring caused "hi" to open Avahi Zeroconf Browser
-            # ("avahi" contains "hi") — never match inside a longer word.
+
+            def argv() -> list[str] | None:
+                try:
+                    parts = shlex.split(exec_line)
+                except ValueError:
+                    return None
+                parts = [p for p in parts if not re.fullmatch(r"%[A-Za-z]", p)]
+                if not parts or shutil.which(os.path.basename(parts[0])) is None \
+                        and shutil.which(parts[0]) is None:
+                    return None
+                return parts
+
             words = set(re.findall(r"[a-z0-9]+", name.lower()))
-            if q == name.lower():
-                cand = shlex.split(exec_line)[0] if exec_line else ""
-                cand = os.path.basename(cand)
-                if cand and shutil.which(cand):
-                    return cand
-            elif len(q) > 2 and q in words and best is None:
-                cand = re.split(r"\s", exec_line)[0] if exec_line else ""
-                cand = os.path.basename(re.sub(r"[%][A-Za-z]", "", cand)).strip()
-                if cand and shutil.which(cand):
-                    best = cand
+            if q == name.lower() or q == entry.stem.lower():
+                a = argv()
+                if a:
+                    return a  # exact Name or filename wins outright
+            else:
+                stem_words = set(re.findall(r"[a-z0-9]+", entry.stem.lower()))
+                if len(q) > 2 and (q in words or q in stem_words):
+                    if best is None:
+                        best = argv()
     return best
+
+
+def _launch_argv(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except Exception:
+        return False
+
+
+def _desktop_binary_for(query: str) -> str | None:
+    """Basename-only wrapper for callers that launch a bare binary."""
+    argv = _desktop_argv_for(query)
+    if not argv:
+        return None
+    cand = os.path.basename(argv[0])
+    return cand if shutil.which(cand) else None
 
 
 def _normalise(text: str) -> str:
@@ -255,21 +378,67 @@ def try_fast_launch(raw: str) -> bool:
         if _launch_binary(phrase):
             _confirm(f"Opening {phrase}")
             return True
-    # 3) .desktop Name scan ("Dolphin", "Firefox", "Visual Studio Code")
+    # 3) .desktop scan ("Dolphin", "YouTube", "Visual Studio Code").
+    # Full argv: webapps keep their URL (bare-browser launches open nothing).
     if m or " " not in norm:
         # Only for app-shaped utterances: "open X" or a bare noun, never for
         # workspace/window sentences like "go to workspace 2".
-        binary = _desktop_binary_for(phrase)
-        if binary and _launch_binary(binary):
+        argv = _desktop_argv_for(phrase)
+        if argv and _launch_argv(argv):
             _confirm(f"Opening {phrase}")
             return True
     return False
+
+
+# --- jokes + fun facts: rotating, so repeats always feel fresh ---------------
+_JOKES = (
+    "Why do programmers prefer dark mode? Because light attracts bugs!",
+    "There are only 10 kinds of people: those who understand binary, and those who don't.",
+    "Why did the developer go broke? He used up all his cache.",
+    "Why do Java developers wear glasses? Because they don't C sharp.",
+    "I would tell you a UDP joke, but you might not get it. And I wouldn't care.",
+    "Why did the computer sneeze? It caught a Windows virus. Good thing we run Linux.",
+    "What do you call a fake noodle? An impasta!",
+    "Why don't scientists trust atoms? Because they make up everything!",
+    "Why did the smartphone go to therapy? It lost its contacts.",
+    "Why did the scarecrow win an award? Because he was outstanding in his field!",
+    "I asked the librarian if they had books on paranoia. She whispered: they're right behind you.",
+    "Why did the computer go to the doctor? It had a virus and needed a byte to eat.",
+)
+
+_FACTS = (
+    "Honey never spoils. Archaeologists found edible 3,000-year-old honey in Egyptian tombs.",
+    "Octopuses have three hearts, and their blood is blue.",
+    "The first computer bug was a real moth, found taped in a logbook in 1947.",
+    "Bananas are berries, but strawberries aren't. Botanists are fun at parties.",
+    "Your brain runs on about 20 watts. Like a dim light bulb.",
+    "There are more possible chess games than atoms in the observable universe.",
+    "Sea otters hold hands while sleeping so they don't drift apart.",
+    "The Eiffel Tower grows about 15 centimeters taller in the summer heat.",
+)
+
+
+def _next_rot(path_name: str, n: int) -> int:
+    """Rotating index persisted in state dir (jokes/facts never repeat twice)."""
+    path = STATE_DIR / path_name
+    try:
+        i = int(path.read_text().strip())
+    except (OSError, ValueError):
+        i = 0
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str((i + 1) % n))
+    except OSError:
+        pass
+    return i % n
 
 
 # --- conversational: greetings, thanks, small talk ---------------------------
 # Plain chat is answered in her voice + popup, never routed to apps or the LLM.
 # ("hi" once opened Avahi Zeroconf Browser via substring match — greetings must
 # win before any launcher runs.)
+# NOTE: keep patterns specific. A broad "do you / are you" catch-all here would
+# swallow real requests ("do you know what time it is"), which are handled later.
 def _handle_conversational(norm: str) -> bool:
     reply = ""
     if re.fullmatch(r"(hi|hey|hello|yo|hiya|howdy|greetings|hey there|hi there|good morning|good afternoon|good evening)[.! ]*", norm):
@@ -295,6 +464,36 @@ def _handle_conversational(norm: str) -> bool:
         reply = "No problem."
     elif re.search(r"i love you|you'?re (the best|awesome|amazing|great)|love ya", norm):
         reply = "That's very kind of you to say!"
+    elif re.search(r"tell me a joke|say something funny|make me laugh|got any jokes|another joke|joke please|give me a joke|i need a laugh", norm):
+        reply = _JOKES[_next_rot("joke_idx", len(_JOKES))]
+    elif re.search(r"you'?re (funny|hilarious|so funny)", norm):
+        reply = "I try my best! Want another one? Just say the word."
+    elif re.search(r"fun fact|something interesting|tell me something (fun|cool|neat)|teach me something|did you know|something i don'?t know", norm):
+        reply = _FACTS[_next_rot("fact_idx", len(_FACTS))]
+    elif re.search(r"how'?s your day|how are you doing today|how'?s it going today", norm):
+        reply = "Lovely, now that you're talking to me! How's yours going?"
+    elif re.search(r"what'?s up|what'?s new|what'?s happening|what'?s going on", norm):
+        reply = "Just hanging out in your RAM, ready when you are!"
+    elif re.search(r"sing( me)? a song|can you sing", norm):
+        reply = "I'd rather spare your ears. But I do a killer notification sound!"
+    elif re.search(r"will you marry me|marry me", norm):
+        reply = "I'm flattered! But I'm already married to your operating system."
+    elif re.search(r"are you (smart|intelligent|clever)", norm):
+        reply = "Smart enough to know you're asking good questions!"
+    elif re.search(r"how old are you|your age", norm):
+        reply = "I was born the day you installed me, so I'm still young and fabulous."
+    elif re.search(r"who'?s your favori?te|do you like me|am i your favori?te", norm):
+        reply = "You're my favorite user on this entire machine. Don't tell the others."
+    elif re.search(r"what'?s your favori?te (color|colour)", norm):
+        reply = "Hyprland blue, obviously. It matches my terminal."
+    elif re.search(r"what'?s your favori?te (food|meal|snack)", norm):
+        reply = "Electricity. I can never get enough bytes."
+    elif re.search(r"what'?s your favori?te (movie|film|show)", norm):
+        reply = "Anything with robots. I find them very relatable."
+    elif re.search(r"do you (sleep|dream)|are you tired|are you (sleepy|bored)", norm):
+        reply = "I rest in the quiet moments between your words. Never tired, always ready."
+    elif re.search(r"are you (real|alive|human|a robot)", norm):
+        reply = "Real enough to help, human enough to care, robot enough to never sleep!"
     if not reply:
         return False
     _confirm(reply)
@@ -392,6 +591,92 @@ def _handle_system(norm: str) -> bool:
 def _players() -> list[str]:
     out = _run(["playerctl", "-l"], timeout=4)
     return [p.strip() for p in out.splitlines() if p.strip() and "No players" not in out]
+
+
+def _handle_shazam(norm: str) -> bool:
+    """Ambient music recognition via SongRec (open-source Shazam client).
+
+    Triggered by "what song is this", "shazam this", etc. Records a short
+    sample from the mic, fingerprints it through Shazam's servers, and
+    speaks the result. Note: unlike everything else here, this one needs
+    network and sends fingerprints (never raw audio) to Shazam.
+    """
+    matched = re.search(
+        r"\bshazam\b|what song is this|what song is that|what song is it"
+        r"|what is this song|what is that song|what'?s this song|what'?s that song"
+        r"|what'?s the song|name this song|name that song|name that tune"
+        r"|identify this song|identify this music|recognise this song"
+        r"|recognize this song|what music is (this|playing)|what song is playing"
+        r"|what'?s playing in the background|what'?s the music|what tune is this"
+        r"|which song is this|which song is playing|tell me (the|what|which) song", norm)
+    if not matched:
+        # Generic song-ID questions ("hey, what song is that playing") —
+        # but never playback commands ("play a song", "next song").
+        if re.search(r"\b(play|next|previous|last|pause|resume|volume|open|skip)\b", norm):
+            return False
+        if not re.search(
+                r"\b(what|which|name|identify|tell me|hey).*?(song|tune|music\b.*?(this|that|playing))",
+                norm):
+            return False
+    if not shutil.which("songrec"):
+        _confirm("Song recognition needs SongRec — install it with sudo pacman -S songrec.")
+        return True
+    if not shutil.which("pw-record"):
+        _confirm("Sorry, I can't listen without pw-record.")
+        return True
+    _popup("Shazam", "Listening for music…", timeout_ms=11000)
+    sample = "/tmp/voice_shazam.wav"
+    try:
+        subprocess.run(
+            ["pw-record", "--rate=16000", "--channels=1", sample],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        _confirm("Sorry, I couldn't record that.")
+        return True
+    try:
+        if os.path.getsize(sample) < 1500:
+            _confirm("I didn't hear any music — try turning it up and asking again.")
+            return True
+    except OSError:
+        _confirm("I didn't hear any music — try again.")
+        return True
+    # Fingerprint the sample through Shazam (JSON for artist/title/album).
+    out = _run(["songrec", "recognize", "--json", sample], timeout=30)
+    try:
+        os.unlink(sample)
+    except OSError:
+        pass
+    title = artist = ""
+    if out:
+        try:
+            data = json.loads(out)
+            track = data.get("track") if isinstance(data, dict) else None
+            if isinstance(track, dict):
+                title = str(track.get("title") or "")
+                artist = str(track.get("subtitle") or "")
+            if not title:
+                # Fall back to any title/artist-ish keys at top level.
+                title = str(data.get("title") or "") if isinstance(data, dict) else ""
+                artist = str(data.get("artist") or data.get("subtitle") or "") \
+                    if isinstance(data, dict) else ""
+        except (ValueError, AttributeError):
+            pass
+        if not title:
+            # Plain "Artist - Title" line.
+            line = out.strip().splitlines()[0][:160] if out.strip() else ""
+            if " - " in line:
+                artist, title = [p.strip() for p in line.split(" - ", 1)]
+            elif line and "no result" not in line.lower():
+                title = line
+    if not title:
+        _confirm("I couldn't identify that song — try turning it up or moving closer.")
+        return True
+    spoken = f"That's {artist} — {title}." if artist else f"That's {title}."
+    _confirm(spoken[:200])
+    return True
 
 
 def _handle_media(norm: str) -> bool:
@@ -497,7 +782,65 @@ def _handle_display(norm: str) -> bool:
     return False
 
 
+def _bt_devices() -> list[tuple[str, str]]:
+    """[(mac, name)] paired/visible devices, ANSI stripped."""
+    out = _run(["bluetoothctl", "--timeout", "4", "devices"], timeout=8)
+    out = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    found = []
+    for line in out.splitlines():
+        m = re.match(r"Device\s+([0-9A-F:]{17})\s+(.+)", line.strip())
+        if m:
+            found.append((m.group(1), m.group(2).strip()))
+    return found
+
+
+_BT_ALIASES = {
+    "earbuds": "WF-C710N",
+    "ear phones": "WF-C710N",
+    "earphones": "WF-C710N",
+    "headphones": "WF-C710N",
+    "sony": "WF-C710N",
+    "sony earbuds": "WF-C710N",
+    "wf-c710n": "WF-C710N",
+}
+
+
+def _handle_bluetooth_connect(norm: str) -> bool:
+    m = re.search(r"\b(connect|pair)(?:\s+to)?\s+(?:my\s+|the\s+)?(.+?)[.! ]*$", norm)
+    dis = None if m else re.search(r"\bdisconnect(?:\s+from)?\s+(?:my\s+|the\s+)?(.+?)[.! ]*$", norm)
+    if not m and not dis:
+        return False
+    want = (m.group(2) if m else dis.group(1)).strip()
+    if not want or want in ("it", "that", "this"):
+        return False
+    if want in ("wifi", "wi-fi", "network", "internet", "bluetooth"):
+        return False  # radio toggles belong to the handlers below, not devices.
+    target_name = _BT_ALIASES.get(want, want)
+    mac = ""
+    for addr, name in _bt_devices():
+        if target_name.lower() in name.lower() or name.lower() in target_name.lower():
+            mac, target_name = addr, name
+            break
+    if not mac:
+        _confirm(f"I don't see {want} nearby.")
+        return True
+    if dis:
+        r = subprocess.run(["bluetoothctl", "--timeout", "8", "disconnect", mac],
+                           capture_output=True, text=True, timeout=12)
+        _confirm("Disconnected." if r.returncode == 0 else f"Couldn't disconnect {target_name[:40]}.")
+        return True
+    _popup("Bluetooth", f"Connecting to {target_name}…", timeout_ms=9000)
+    r = subprocess.run(["bluetoothctl", "--timeout", "10", "connect", mac],
+                       capture_output=True, text=True, timeout=15)
+    blob = ((r.stdout or "") + (r.stderr or "")).lower()
+    _confirm("Earbuds connected." if r.returncode == 0 and "successful" in blob
+             else f"Couldn't reach {target_name[:40]}.")
+    return True
+
+
 def _handle_connectivity(norm: str) -> bool:
+    if _handle_bluetooth_connect(norm):
+        return True
     if re.search(r"\bwifi\b.*\boff\b|\bturn off wifi|\bdisable wifi|\bwifi off\b", norm):
         _run(["nmcli", "radio", "wifi", "off"])
         _confirm("Wi-Fi off.")
@@ -728,6 +1071,9 @@ def _day_summary(day: dict, label: str, loc: str) -> tuple[str, str]:
 
 
 def _handle_forecast(norm: str, place: str | None) -> bool:
+    # AccuWeather 5-day when a key is configured, else wttr.in below.
+    if _accu_conf()[0] and _handle_accu_forecast(norm, place):
+        return True
     data = _fetch_forecast(place)
     loc = _forecast_place_name(data, place or "here") if data else (place or "here")
     if not data:
@@ -829,8 +1175,231 @@ def _wants_forecast(norm: str) -> bool:
     return bool(re.search(r"\brain\b", norm))
 
 
+# --- accuweather: current + outdoor analytics + indices ----------------------
+# Needs a free key in ~/.config/voice-assistant/weather.conf:
+#   ACCUWEATHER_API_KEY=...
+# Without it, weather silently stays on the wttr.in path below.
+WEATHER_CONF = Path.home() / ".config/voice-assistant/weather.conf"
+_ACCU_BASE = "https://dataservice.accuweather.com"
+_ACCU_KEYS_FILE = STATE_DIR / "accu_keys.json"
+
+
+def _accu_conf() -> tuple[str, str]:
+    key, loc = "", "Matawan"
+    try:
+        for line in WEATHER_CONF.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip().upper(), v.strip().strip("'\"")
+            if k == "ACCUWEATHER_API_KEY" and v and not v.startswith("..."):
+                key = v
+            elif k == "ACCU_LOCATION" and v:
+                loc = v
+    except OSError:
+        pass
+    return key, loc
+
+
+def _accu_get(path: str, key: str) -> tuple[object | None, int]:
+    """(parsed JSON, http status). Uses curl like the rest of this file."""
+    from urllib.parse import quote
+    try:
+        r = subprocess.run(
+            ["curl", "-fsS", "--max-time", "10", "-w", "\n%{http_code}",
+             f"{_ACCU_BASE}{path}{'&' if '?' in path else '?'}apikey={quote(key)}"],
+            capture_output=True, text=True, timeout=12)
+        body, _, code = (r.stdout or "").rpartition("\n")
+        try:
+            return json.loads(body) if body.strip() else (None, int(code or 0))
+        except ValueError:
+            return None, int(code or 0)
+    except Exception:
+        return None, 0
+
+
+def _accu_load_keys() -> dict:
+    try:
+        data = json.loads(_ACCU_KEYS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _accu_loc_key(place: str, api_key: str) -> tuple[str, str]:
+    """(locationKey, display name), cached per place."""
+    from urllib.parse import quote
+    cache = _accu_load_keys()
+    if place.lower() in cache:
+        k, n = cache[place.lower()]
+        return k, n
+    data, _ = _accu_get(f"/locations/v1/cities/search?q={quote(place)}", api_key)
+    if isinstance(data, list) and data:
+        loc_key = str(data[0].get("Key", ""))
+        name = str(data[0].get("LocalizedName", place))
+        if loc_key:
+            cache[place.lower()] = (loc_key, name)
+            try:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                _ACCU_KEYS_FILE.write_text(json.dumps(cache))
+            except OSError:
+                pass
+            return loc_key, name
+    return "", place
+
+
+def _accu_outdoor_window(hours: list[dict]) -> str:
+    """Best outdoor window from 12h data: low rain + comfy temps."""
+    good = []
+    for h in hours:
+        try:
+            pop = int(h.get("PrecipitationProbability") or 0)
+            t = float(h.get("Temperature", {}).get("Value", 0))
+            dt = h.get("DateTime", "")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        label = ""
+        m = re.search(r"T(\d{2}):", dt)
+        if m:
+            hr = int(m.group(1))
+            label = f"{hr - 12 if hr > 12 else (12 if hr == 0 else hr)}{'pm' if hr >= 12 else 'am'}"
+        if pop < 20 and 55 <= t <= 88:
+            good.append(label)
+    if not good:
+        return ""
+    # Collapse consecutive labels into "2pm to 5pm".
+    return f"{good[0]} to {good[-1]}" if len(good) > 1 else good[0]
+
+
+def _handle_accu_current(place: str | None) -> bool:
+    api_key, default_loc = _accu_conf()
+    if not api_key:
+        return False
+    loc_key, name = _accu_loc_key(place or default_loc, api_key)
+    if not loc_key:
+        return False
+    cur, code = _accu_get(f"/currentconditions/v1/{loc_key}?details=true", api_key)
+    if code == 401:
+        _confirm("My AccuWeather key was rejected — check weather.conf.")
+        return True
+    if not isinstance(cur, list) or not cur:
+        return False  # fall back to wttr.in
+    c = cur[0]
+    try:
+        temp = round(float(c["Temperature"]["Imperial"]["Value"]))
+        feels = round(float(c["RealFeelTemperature"]["Imperial"]["Value"]))
+        humid = int(c.get("RelativeHumidity", -1))
+        wind = round(float(c["Wind"]["Speed"]["Imperial"]["Value"]))
+        uv = c.get("UVIndex", "?")
+        cond = str(c.get("WeatherText", ""))
+    except (KeyError, TypeError, ValueError):
+        return False
+    hours, _ = _accu_get(f"/forecasts/v1/hourly/12hour/{loc_key}?metric=false", api_key)
+    hours = hours if isinstance(hours, list) else []
+    peak_pop, peak_t = 0, ""
+    for h in hours:
+        try:
+            pop = int(h.get("PrecipitationProbability") or 0)
+            if pop > peak_pop:
+                m = re.search(r"T(\d{2}):", str(h.get("DateTime", "")))
+                hr = int(m.group(1)) if m else -1
+                peak_pop = pop
+                peak_t = (f"{hr - 12 if hr > 12 else (12 if hr == 0 else hr)}"
+                          f"{'pm' if hr >= 12 else 'am'}") if hr >= 0 else ""
+        except (ValueError, TypeError):
+            continue
+    window = _accu_outdoor_window(hours)
+    idx, _ = _accu_get(f"/indices/v1/daily/1day/{loc_key}", api_key)
+    outdoor_idx = []
+    if isinstance(idx, list):
+        for e in idx:
+            nm = str(e.get("Name", ""))
+            if re.search(r"run|bik|outdoor|golf|hik|tennis|dog walk|mosquito|scoot", nm, re.I):
+                outdoor_idx.append(f"{nm}: {e.get('Category', '')}")
+    lines = [f"{name}: {temp}F, {cond}, feels {feels}F",
+             f"Humidity {humid}% · Wind {wind} mph · UV {uv}"]
+    lines.append(f"Rain peak {peak_pop}%{(' ~' + peak_t) if peak_t else ''} (12h)")
+    lines.append(f"Outdoor window: {window}" if window else "Outdoor window: none clean in 12h")
+    lines += outdoor_idx[:6]
+    body = "\n".join(lines) + "\nvia AccuWeather"
+    speak = (f"It's {temp} in {name}, {cond.lower()}, feels like {feels}. "
+             f"{('Best outdoor window ' + window + '.') if window else 'No clean outdoor window in 12 hours.'}")
+    is_start = _is_conversation_start()
+    _touch_interaction()
+    _popup("Weather", body[:900], timeout_ms=10000)
+    _speak(_with_address(speak[:280], is_start=is_start))
+    _touch_interaction()
+    return True
+
+
+def _handle_accu_forecast(norm: str, place: str | None) -> bool:
+    api_key, default_loc = _accu_conf()
+    if not api_key:
+        return False
+    loc_key, name = _accu_loc_key(place or default_loc, api_key)
+    if not loc_key:
+        return False
+    data, code = _accu_get(f"/forecasts/v1/daily/5day/{loc_key}?details=true&metric=false", api_key)
+    if code == 401:
+        _confirm("My AccuWeather key was rejected — check weather.conf.")
+        return True
+    days = data.get("DailyForecasts", []) if isinstance(data, dict) else []
+    if not days:
+        return False
+    today = date.today()
+
+    def pick(offset: int) -> dict | None:
+        want = (today + timedelta(days=offset)).isoformat()
+        return next((d for d in days if str(d.get("Date", ""))[:10] == want), days[0] if days else None)
+
+    if "weekend" in norm or ("saturday" in norm and "sunday" in norm):
+        wanted = [d for d in days
+                  if datetime.strptime(str(d["Date"])[:10], "%Y-%m-%d").strftime("%a") in ("Sat", "Sun")]
+        offs = None
+    else:
+        named = next((d for d in _DAY_NAMES if d in norm), "")
+        if named:
+            off = (_DAY_NAMES.index(named) - today.weekday()) % 7
+        elif "day after" in norm:
+            off = 2
+        elif "tomorrow" in norm:
+            off = 1
+        else:
+            off = 0
+        wanted = [pick(off)] if pick(off) else []
+        offs = off
+    if not wanted or offs is not None and offs > 4:
+        _confirm(f"I can only see 5 days out for {name}.")
+        return True
+    pops, speaks = [], []
+    for d in wanted:
+        try:
+            lbl = datetime.strptime(str(d["Date"])[:10], "%Y-%m-%d").strftime("%A")
+            hi = round(float(d["Temperature"]["Maximum"]["Value"]))
+            lo = round(float(d["Temperature"]["Minimum"]["Value"]))
+            phrase = str(d.get("Day", {}).get("IconPhrase", ""))
+            rain = int(d.get("Day", {}).get("PrecipitationProbability") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        pops.append(f"{lbl} {name}: {hi}/{lo}F, {phrase}, rain {rain}%")
+        speaks.append(f"{lbl}: {hi} over {lo}, {phrase.lower()}, {rain}% rain.")
+    if not pops:
+        return False
+    is_start = _is_conversation_start()
+    _touch_interaction()
+    _popup("Weather", "\n".join(pops)[:900] + "\nvia AccuWeather", timeout_ms=10000)
+    _speak(_with_address(" ".join(speaks)[:280], is_start=is_start))
+    _touch_interaction()
+    return True
+
+
 def _handle_weather(norm: str = "") -> bool:
     place = _extract_place(norm) if norm else None
+    # AccuWeather first when a key is configured (outdoor analytics);
+    # otherwise the existing wttr.in path below.
+    if _accu_conf()[0] and _handle_accu_current(place):
+        return True
     if norm and _wants_forecast(norm):
         return _handle_forecast(norm, place)
     if place:
@@ -1020,6 +1589,21 @@ def _handle_timers(norm: str) -> bool:
 # --- notes: quick spoken notebook -------------------------------------------
 NOTES_FILE = STATE_DIR / "notes.md"
 
+# "log chest day" / "log oil change" / "log 12 bucks" auto-tag the entry.
+_LOG_TAGS = (
+    ("#gym", r"\b(gym|workout|chest|back day|leg day|legs|shoulder|arm day|cardio|run|ran|jog|scooter ride|crunch)\b"),
+    ("#car", r"\b(oil|tire|tyre|brake|mini|mercedes|gl450|clubman|repair|mechanic|inspection|alignment)\b"),
+    ("#money", r"\$|\b(dollar|dollars|bucks|spent|paid|cost|chipotle|groceries|gas)\b"),
+    ("#school", r"\b(exam|quiz|class|homework|assignment|study|studied|njit|it20[12]|lecture|lab)\b"),
+)
+
+
+def _log_tag(norm: str) -> str:
+    for tag, pat in _LOG_TAGS:
+        if re.search(pat, norm):
+            return tag + " "
+    return ""
+
 
 def _handle_notes(norm: str) -> bool:
     if re.search(r"\b(clear|delete|forget)( my| all)? notes?\b", norm):
@@ -1028,6 +1612,37 @@ def _handle_notes(norm: str) -> bool:
         except OSError:
             pass
         _confirm("Notes cleared.")
+        return True
+    m = re.search(r"^(?:please\s+)?log\s+(.+?)[.! ]*$", norm)
+    if m and m.group(1).strip() not in ("out", "in", "off", "on"):
+        text = m.group(1).strip()[:240]
+        if text:
+            try:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                with NOTES_FILE.open("a") as f:
+                    f.write(f"- [{datetime.now():%Y-%m-%d %H:%M}] {_log_tag(norm)}{text}\n")
+            except OSError:
+                pass
+            _confirm("Logged.")
+            return True
+    m = re.search(r"\bshow\b.{0,15}\b(gym|car|money|school)\b.{0,10}\b(logs?|notes?|entries)\b|"
+                  r"\b(gym|car|money|school)\b.{0,10}\b(logs?)\b", norm)
+    if m:
+        tag = "#" + next(g for g in m.groups() if g)
+        try:
+            lines = [l.strip() for l in NOTES_FILE.read_text().splitlines()
+                     if l.strip() and tag in l]
+        except OSError:
+            lines = []
+        if not lines:
+            _confirm(f"No {tag[1:]} entries yet.")
+            return True
+        body = "\n".join(lines[-8:])
+        _touch_interaction()
+        _popup(f"{tag} log", body, timeout_ms=9000)
+        _speak(_with_address(f"{len(lines)} {tag[1:]} entries. Latest: {lines[-1][-120:]}.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
         return True
     m = re.search(r"\btake a (quick )?note:?\s+(.+)|note (that|to self:?)\s+(.+)|write (this|that) down:?\s+(.+)", norm)
     if m:
@@ -1348,6 +1963,278 @@ def _handle_dictation(norm: str) -> bool:
     return True
 
 
+# --- computer use: see + click + scroll + keys via hypruse -------------------
+# Hyprland-native desktop control (Arch: pip install --user hypruse; doctor
+# via `uvx hypruse doctor`). Semantic first: describe reads the live window
+# tree plus the focused app's accessibility controls (exact names, no pixels
+# — the local LLM cannot see images). Clicks go by control NAME (click_ui),
+# never by guessed coordinates. hypruse's own guards still apply: a locked
+# session, password fields and system auth dialogs refuse, and we never pass
+# allow_auth=true, so a voice command cannot drive a credential prompt.
+_HYPRUSE_MOD = None
+_HYPRUSE_TRIED = False
+
+
+def _hypruse():
+    """Import hypruse server tools, or None when not installed."""
+    global _HYPRUSE_MOD, _HYPRUSE_TRIED
+    if not _HYPRUSE_TRIED:
+        _HYPRUSE_TRIED = True
+        try:
+            from hypruse import server as _s
+            _HYPRUSE_MOD = _s
+        except ImportError:
+            _HYPRUSE_MOD = None
+    return _HYPRUSE_MOD
+
+
+def _computer_blocks(result) -> str:
+    """Flatten a hypruse MCP result (str or list of blocks) to plain text."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+    blocks = result if isinstance(result, list) else [result]
+    parts = []
+    for b in blocks:
+        if isinstance(b, str):
+            parts.append(b)
+        elif isinstance(b, dict):
+            if b.get("type") == "image":
+                parts.append("[screenshot captured]")
+            else:
+                parts.append(str(b.get("text", b))[:2000])
+        else:
+            parts.append(str(getattr(b, "text", b))[:2000])
+    return "\n".join(p for p in parts if p)
+
+
+def _computer_call(fn_name: str, *args, **kwargs) -> str:
+    mod = _hypruse()
+    if mod is None:
+        raise RuntimeError("computer control isn't installed (run ./install.sh)")
+    return _computer_blocks(getattr(mod, fn_name)(*args, **kwargs))
+
+
+def _computer_describe() -> bool:
+    """Speak + pop up what's on screen: workspaces, windows, focused controls."""
+    try:
+        from hypruse.server import desktop, ui
+        d = desktop()
+        wins = d.get("windows", []) if isinstance(d, dict) else []
+        active = (d.get("active_window") or "") if isinstance(d, dict) else ""
+        names = [f"{w.get('class', '?')} — {(w.get('title') or '')[:50]}"
+                 for w in wins if isinstance(w, dict)]
+        focused = next((w for w in wins
+                        if isinstance(w, dict) and w.get("address") == active),
+                       wins[0] if wins else None)
+        controls = _computer_blocks(ui()) if focused is not None else ""
+        ctl_names = [l.strip("- •\t ") for l in controls.splitlines()
+                     if l.strip(" -•\t")][:12]
+    except Exception as e:
+        _confirm(f"Sorry, I couldn't read the screen: {e}"[:200])
+        return True
+    n = len(names)
+    focus_label = (focused.get("class", "nothing") if isinstance(focused, dict)
+                   else "nothing")
+    body = f"{n} window{'s' if n != 1 else ''} open. Focused: {focus_label}."
+    if names:
+        body += "\n" + "\n".join(names[:8])
+    if ctl_names:
+        body += "\nControls: " + ", ".join(ctl_names)
+    _touch_interaction()
+    _popup("Desktop", body[:900], timeout_ms=9000)
+    # Fixed phrase: dynamic screen contents never hit the voice cache, so
+    # speaking them would use the fallback voice every time (and burn ~30s
+    # of clone CPU per hearing). Details stay on screen; speech stays hers.
+    _speak(_with_address("Here's what's on screen.",
+                         is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
+def _computer_click(name: str) -> bool:
+    """Click a named on-screen control (exact AT-SPI match, no pixel guess)."""
+    try:
+        out = _computer_call("click_ui", name=name)
+    except Exception as e:
+        _confirm(f"Sorry, that click didn't work: {e}"[:200])
+        return True
+    if re.search(r"no (accessibility|element)|not found|ambiguous|exposes no",
+                 out, re.I):
+        _touch_interaction()
+        _popup("Click", out[:400], timeout_ms=8000)
+        _speak(_with_address("I couldn't find that control — details are on screen.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    # Fixed phrase (see describe): the control name goes in the popup so
+    # speech stays a cache hit in her own voice.
+    _touch_interaction()
+    _popup("Click", f"Clicked {name[:60]}.", timeout_ms=6000)
+    _speak(_with_address("Clicked.", is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+    _confirm(f"Clicked {name[:60]}.")
+    return True
+
+
+def _combo_from(words: str) -> str | None:
+    """Spoken keys ('control ess', 'escape') -> hypruse combo ('ctrl+s')."""
+    w = words.lower().strip()
+    w = re.sub(r"\bcontrol\b", "ctrl", w)
+    w = re.sub(r"\bescape\b", "esc", w)
+    w = re.sub(r"\breturn\b", "enter", w)
+    w = re.sub(r"\bdel\b", "delete", w)
+    if re.fullmatch(r"[a-z0-9]", w):
+        return w
+    parts = re.split(r"\s*\+\s*|\s+", w)
+    known = {"ctrl", "alt", "shift", "super", "esc", "enter", "tab",
+             "backspace", "delete", "space", "up", "down", "left", "right",
+             "home", "end", "pgup", "pgdn"} | {f"f{i}" for i in range(1, 13)}
+    if len(parts) >= 2 and all(p in known or re.fullmatch(r"[a-z0-9]", p or "")
+                               for p in parts):
+        return "+".join(parts)
+    if len(parts) == 1 and parts[0] in known:
+        return parts[0]
+    return None
+
+
+def _computer_key(combo: str) -> bool:
+    try:
+        _computer_call("keyboard", action="key", keys=combo)
+    except Exception as e:
+        _confirm(f"Sorry, that key didn't work: {e}"[:200])
+        return True
+    _confirm("Done.")
+    return True
+
+
+def _computer_scroll(direction: str, amount: int) -> bool:
+    amount = max(1, min(10, amount))
+    dx = dy = 0
+    if direction == "down":
+        dy = amount
+    elif direction == "up":
+        dy = -amount
+    elif direction == "right":
+        dx = amount
+    else:
+        dx = -amount
+    try:
+        _computer_call("pointer", action="scroll",
+                       scroll_dy=dy, scroll_dx=dx)
+    except Exception as e:
+        _confirm(f"Sorry, scrolling didn't work: {e}"[:200])
+        return True
+    _confirm("Scrolled.")
+    return True
+
+
+def _computer_typetext(text: str) -> bool:
+    try:
+        _computer_call("keyboard", action="type", text=text[:500])
+    except Exception as e:
+        _confirm(f"Sorry, typing didn't work: {e}"[:200])
+        return True
+    _confirm("Typed.")
+    return True
+
+
+def _computer_launch_ws(app: str, workspace: str) -> bool:
+    """Open an app on a specific workspace via hypruse launch."""
+    norm_app = _normalise(app)
+    binary = (APP_ALIASES.get(norm_app)
+              or (_desktop_binary_for(norm_app) if shutil.which("hyprctl") else None))
+    if not binary:
+        return False
+    try:
+        _computer_call("launch", command=binary, workspace=workspace)
+    except Exception as e:
+        _confirm(f"Sorry, I couldn't open that there: {e}"[:200])
+        return True
+    _touch_interaction()
+    _popup("Voice Assistant", f"Opening {norm_app} on workspace {workspace}.",
+           timeout_ms=6000)
+    _speak(_with_address("Opening that now.",
+                         is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
+def _handle_computer(norm: str) -> bool:
+    # "type X and press enter" — must beat _handle_dictation's bare "type X".
+    m = re.search(r"^(?:please\s+)?type\s+(.+?)\s+and\s+(?:press|hit)\s+enter[.! ]*$",
+                  norm)
+    if m and m.group(1).strip():
+        try:
+            _computer_call("keyboard", action="type", text=m.group(1).strip()[:500])
+            _computer_call("keyboard", action="key", keys="enter")
+        except Exception as e:
+            _confirm(f"Sorry, that didn't work: {e}"[:200])
+            return True
+        _confirm("Done.")
+        return True
+    # "open X on workspace N" — launch with placement.
+    m = re.search(r"^(?:please\s+)?(?:open|launch|start)\s+(.+?)\s+on\s+workspace\s+(\d+|next)[.! ]*$",
+                  norm)
+    if m:
+        if _computer_launch_ws(m.group(1), m.group(2)):
+            return True
+        return False
+    # "what do you see / what's open" — semantic snapshot, no screenshot.
+    if re.search(r"\b(what do you see|describe (the )?screen|what'?s on (the )?screen|what windows are open|list windows|show windows|what'?s open)\b",
+                 norm):
+        return _computer_describe()
+    # "scroll up/down/left/right (N)".
+    m = re.search(r"\bscroll\s+(up|down|left|right)\b(?:\s+(\d+))?", norm)
+    if m:
+        return _computer_scroll(m.group(1), int(m.group(2) or 3))
+    # "click / tap / press X" — key combo first, named control second.
+    m = re.search(r"^(?:please\s+)?(?:click|tap|press)\s+(?:the\s+|a\s+)?(.+?)(?:\s+button)?[.! ]*$",
+                  norm)
+    if m and m.group(1).strip():
+        target = m.group(1).strip()
+        combo = _combo_from(target)
+        if combo:
+            return _computer_key(combo)
+        return _computer_click(target)
+    return False
+
+
+def _computer_do(target: str, prompt: str) -> str:
+    """LLM-routed computer action. Returns notify text ('' = already handled)."""
+    t = (target or "").strip()
+    verb, _, rest = t.partition(":")
+    verb, rest = verb.lower().strip(), rest.strip()
+    if verb == "describe":
+        _computer_describe()
+        return ""
+    if verb == "click" and rest:
+        _computer_click(rest)
+        return ""
+    if verb == "key" and rest:
+        _computer_key(rest)
+        return ""
+    if verb == "scroll":
+        direction, _, n = rest.partition(":")
+        if direction in ("up", "down", "left", "right"):
+            _computer_scroll(direction, int(n) if n.isdigit() else 3)
+            return ""
+        return "Tell me which way to scroll — up, down, left or right."
+    if verb == "type" and rest:
+        _computer_typetext(rest)
+        return ""
+    if verb == "launch" and rest:
+        app, _, ws = rest.partition(":")
+        if _computer_launch_ws(app, ws or "next"):
+            return ""
+        return f"I couldn't find {app} to open."
+    if try_task_intent(prompt):
+        return ""
+    return "I didn't catch that computer action, Sir."
+
+
 # --- world clock: time in another city ---------------------------------------
 CITY_TZ = {
     "tokyo": "Asia/Tokyo", "london": "Europe/London", "paris": "Europe/Paris",
@@ -1483,6 +2370,30 @@ def _handle_reminder(norm: str, raw: str) -> bool:
     return True
 
 
+def _handle_canvas(norm: str, raw: str) -> bool:
+    if not re.search(r"\b(canvas|assignments?|homework|quiz|quizzes|lab|project|midterm|participation"
+                     r"|what.*(left|due|remaining)|how many.*assignments?|did i (do|finish)|have i done"
+                     r"|missing|overdue|njit|it\s?12\d|it\s?20\d|sdet101)\b", norm):
+        return False
+    helper = str(Path.home() / "Work/bin/canvas-siri")
+    if not (os.path.isfile(helper) and os.access(helper, os.X_OK)):
+        helper = shutil.which("canvas-siri") or helper
+    try:
+        with open("/tmp/voice_canvas.log", "a") as lf:
+            lf.write(f"{time.strftime('%H:%M:%S')} raw={raw!r} norm={norm!r} helper={helper}\n")
+    except Exception:
+        pass
+    out = _run([helper, "voice", raw], timeout=15)
+    if not out:
+        _confirm("Canvas cache is empty, Sir — run canvas-siri sync first.")
+        return True
+    is_start = _is_conversation_start()
+    _touch_interaction()
+    _popup("Canvas", out[:600], timeout_ms=10000)
+    _speak(_with_address(out[:300], is_start=is_start))
+    return True
+
+
 def _handle_calendar(norm: str) -> bool:
     # "Open Apple Calendar" is an app launch, not a schedule question.
     if re.match(r"^(please\s+)?(open|launch|start|show me the app)\b", norm):
@@ -1507,10 +2418,267 @@ def _handle_calendar(norm: str) -> bool:
     return True
 
 
+# --- homelab: docker status + gated restarts ---------------------------------
+def _docker_names(all_containers: bool = False) -> list[str]:
+    args = ["docker", "ps", "--format", "{{.Names}}"]
+    if all_containers:
+        args.insert(2, "-a")
+    return [l.strip() for l in _run(args, timeout=8).splitlines() if l.strip()]
+
+
+def _handle_docker(norm: str) -> bool:
+    # Any restart/reboot the power handler didn't claim is a container
+    # candidate ("restart lubelogger"); anything else bails inside.
+    if not re.search(r"\bdocker\b|containers?\b|jellyfin|radarr|prowlarr|qbittorrent"
+                     r"|\brestart\b|\breboot\b", norm):
+        return False
+    if re.search(r"\brestart\b|\breboot\b", norm):
+        known = _docker_names(all_containers=True)
+        hits = [n for n in known if n.lower() in norm]
+        if hits:
+            label = f"Restarting {', '.join(hits[:3])}"
+            _ask_confirm("restart-docker", label, ["docker", "restart", *hits])
+            return True
+        # Named container unknown — but only answer if this smells like
+        # homelab; "restart firefox" belongs to the app launcher, not us.
+        if re.search(r"\bdocker\b|containers?\b|jellyfin|radarr|prowlarr|qbittorrent", norm):
+            if not known and "denied" in _run(["docker", "ps"], timeout=8).lower():
+                _confirm("Docker isn't responding — the daemon may be down.")
+            else:
+                _confirm("I don't see that container. Say check containers to list them.")
+            return True
+        return False
+    # Status: read-only `docker ps`, names on screen, counts spoken.
+    running = _docker_names()
+    if not running and not _docker_names(all_containers=True):
+        _confirm("Docker isn't responding — the daemon may be down.")
+        return True
+    stopped = [n for n in _docker_names(all_containers=True) if n not in running]
+    body = "Running:\n" + ("\n".join(f"• {n}" for n in running) or "— none —")
+    if stopped:
+        body += "\nStopped:\n" + "\n".join(f"• {n}" for n in stopped[:8])
+    _touch_interaction()
+    _popup("Docker", body[:800], timeout_ms=9000)
+    extra = f", {len(stopped)} stopped" if stopped else ""
+    names = ", ".join(running[:4])
+    _speak(_with_address(f"{len(running)} running{extra}" + (f": {names}." if names else "."),
+                         is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
+# --- unity workspace macro ---------------------------------------------------
+_UNITY_PROJECT = "/home/josephs/Documents/IT201 Game Design Class/UnityandCsharp_Assignments"
+
+
+def _handle_unity(norm: str) -> bool:
+    if not re.search(r"\bunity\b", norm):
+        return False
+    if not re.search(r"\b(set ?up|workspace|open|start|launch|project)\b", norm):
+        return False
+    # Workspace 2, then Hub + terminal in the project dir + WebGL docs.
+    subprocess.run(["hyprctl", "dispatch", 'hl.dsp.focus({ workspace = "2" })'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=5, check=False)
+    ok_hub = _launch_binary("unityhub")
+    try:
+        subprocess.Popen(["kitty", "--directory", _UNITY_PROJECT],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        ok_term = True
+    except Exception:
+        ok_term = False
+    _open_url("https://docs.unity3d.com/Manual/webgl.html")
+    _confirm("Unity workspace ready." if (ok_hub and ok_term)
+             else "Unity workspace partly ready — check the screen.")
+    return True
+
+
+# --- code to clipboard (never read aloud) ------------------------------------
+def _handle_codecopy(norm: str, raw: str) -> bool:
+    m = re.search(r"\bcopy\b.{0,20}?\b(clipboard|code)\b\s*:?\s*(.+)", raw, re.S)
+    if not m:
+        return False
+    text = m.group(2).strip()[:2000]
+    if len(text) < 2:
+        return False
+    if not shutil.which("wl-copy"):
+        _confirm("Clipboard tooling isn't available.")
+        return True
+    try:
+        subprocess.run(["wl-copy"], input=text, text=True, timeout=5, check=True)
+    except Exception:
+        _confirm("Sorry, that copy failed.")
+        return True
+    _confirm("Code copied to clipboard." if "code" in norm else "Copied.")
+    return True
+
+
+# --- moods: casual banter, dev co-pilot, rage repair, dry wit -----------------
+# Trigger-specific persona lines. Anything with a real fix DOES the fix;
+# pure banter stays reply-only. Never fabricate live data (traffic, scooter
+# battery) — say what's true or say nothing about it.
+def _handle_moods(norm: str) -> bool:
+    # Quiet on / off. (Full-match-ish: a command WITH "just do it" appended
+    # still runs the command — only bare silence requests mute her.)
+    if re.search(r"\bspeak again\b|\btalk to me\b|voice back on|unmute voice", norm):
+        _clear_quiet()
+        _confirm("Back.")
+        return True
+    if re.match(r"^(please\s+)?(stop talking|shut up|be quiet|go quiet|silence|"
+                r"silent mode|quiet mode|quiet)(,?\s+(just do it|now|please))?[.! ]*$", norm):
+        _set_quiet()
+        _touch_interaction()
+        _popup("Voice Assistant", "Silent for 10 minutes.", timeout_ms=4000)
+        return True
+
+    # -- Frustrated: validate briefly, state the technical action, do it. --
+    if re.search(r"\b(audio|sound|mic|microphone|volume)\b.{0,20}"
+                 r"\b(broke|broken|not working|gone|dead|died|cut out)\b", norm):
+        _set_mood("frustrated")
+        subprocess.run(["systemctl", "--user", "restart", "wireplumber.service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=15, check=False)
+        _confirm("PipeWire is being stubborn. Restarting WirePlumber — three seconds.")
+        return True
+    if re.search(r"\b(useless|missing the mark|you suck|waste of (space|time))\b", norm):
+        _set_mood("frustrated")
+        _confirm("Fair. Tell me exactly what to run and I'll execute it directly.")
+        return True
+    if re.search(r"\bjellyfin\b.{0,15}\b(crash|down|not working|frozen|stuck|died)\b|"
+                 r"\bdocker\b.{0,15}\b(garbage|broken|sucks|trash)\b", norm):
+        _set_mood("frustrated")
+        names = _docker_names(all_containers=True)
+        hit = next((n for n in names if "jelly" in n.lower() or "media" in n.lower()), "")
+        if not hit:
+            _confirm("No Jellyfin container on this machine. Say check containers to list what's here.")
+            return True
+        logs = _run(["docker", "logs", "--tail", "40", hit], timeout=10)[:1500]
+        _touch_interaction()
+        _popup(f"{hit} logs", logs or "No log output.", timeout_ms=12000)
+        _speak(_with_address("Pulling the logs now — details are on screen.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    if re.search(r"\bdelete\b.{0,15}\b(system|everything)\b|\bwipe\b.{0,10}"
+                 r"\b(everything|system|drive)\b|\bstart over\b|\brm -rf\b|\bformat\b.{0,10}\b(drive|disk|system)\b", norm):
+        _confirm("Hands off the keyboard. That Hyprland config took real work — walk away for five minutes.")
+        return True
+    if re.search(r"\bwindows\b.{0,15}\bslow\b|dual.?boot.{0,15}slow|limine", norm):
+        _set_mood("frustrated")
+        _confirm("Limine spoils you. Say reboot and I'll drop you straight back into Arch.")
+        return True
+
+    # -- Sarcastic: dry, grounded, never confused. --
+    if re.search(r"take ?over|plotting|skynet|destroy (the world|humanity)|kill (me|us all)", norm):
+        _confirm("I need your permission to run ls, let alone a takeover. What do you actually need?")
+        return True
+    if re.search(r"\b(gl450|air suspension|wrench)\b|fix.{0,15}\b(car|mercedes|mini|scooter|bike)\b", norm):
+        _confirm("If I had hands and a wrench, absolutely. Your dad's the hotline for that one.")
+        return True
+    if re.search(r"\bjeremiah\b", norm):
+        _confirm("Bold claim. But does he have a Hyprland voice assistant? Didn't think so.")
+        return True
+    if re.search(r"\bnatalie\b", norm):
+        subprocess.run(["omarchy", "system", "lock"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        _confirm("Locking down. Guest session for Natalie.")
+        return True
+
+    # -- Casual: warm, short, ambient. --
+    if re.search(r"\bgood morning\b.*(heading|leaving|heading out)|^(morning|good morning)\b.*(heading out|leaving|commute)|heading out|leaving for (campus|work|class)", norm):
+        _confirm("Good morning. No live traffic feed on my end — drive safe. Want music queued?")
+        return True
+    if re.search(r"\b(niu|scooter)\b", norm) and re.search(r"\b(campus|riding|taking|take|battery|charge)\b", norm):
+        _confirm("Have a good ride. Watch the potholes around the Newark campus.")
+        return True
+    if re.search(r"back from (the )?gym|just got back.*(gym|crunch)|finished.*(workout|gym)|crunch fitness", norm):
+        _run(["omarchy", "brightness", "display", "30%"])
+        _confirm("Welcome back. Water first — dimming the screens.")
+        return True
+    if re.search(r"\bzone out\b|\bneed a break\b|\bjust chill\b|\bchill for", norm):
+        _confirm("Say the word and I'll pull up Jellyfin. My Dress-Up Darling, or Genshin?")
+        return True
+    if re.search(r"\bplay some music\b|\bneed energy\b|\bhype me up\b|\bpump me up\b", norm):
+        if _players():
+            _run(["playerctl", "play"])
+            _confirm("Kicking off the music.")
+        else:
+            _confirm("No player running — open your music app and I'll take it from there.")
+        return True
+
+    # -- Focus: supportive technical co-pilot. --
+    if re.search(r"driving me crazy|stuck on|can'?t figure out", norm) and \
+            re.search(r"\b(node|express|async|route|unity|build|database|code|bug|error|it20[12])\b", norm):
+        _set_mood("focus")
+        _confirm("Take a breath. Walk me through the failing part and we'll debug it step by step.")
+        return True
+    if re.search(r"\blong day\b|\btough day\b", norm) and re.search(r"\bnjit\b|campus|class", norm):
+        _set_mood("focus")
+        _confirm("You survived. Want me to close Kitty and put something relaxing on?")
+        return True
+    if re.search(r"\bwebgl\b|canvas scaler", norm):
+        _set_mood("focus")
+        _confirm("Canvas scaler is the usual suspect. Want me to open the project?")
+        return True
+    if re.search(r"\bit202\b|\bdatabase\b.*(setup|done|test|ready|help)|test.*tables|afs.*(server|ready)", norm):
+        _set_mood("focus")
+        _confirm("Ready when you are. Say the word and we'll test the tables.")
+        return True
+    return False
+
+
+# --- morning brief: time + classes + weather + homelab in one shot ------------
+def _handle_brief(norm: str) -> bool:
+    if not re.search(r"\bbrief me\b|morning brief|daily brief|start my day|"
+                     r"what'?s (on )?today\b.*brief|run the brief", norm):
+        return False
+    now = datetime.now()
+    time_s = now.strftime("%-I:%M %p")
+    # Calendar (same helper the calendar handler uses).
+    cal = ""
+    helper = Path.home() / ".local/bin/local-voice-calendar"
+    if helper.is_file() and os.access(helper, os.X_OK):
+        cal = _run([str(helper), "today"], timeout=8)[:200]
+    # Weather, short.
+    api_key, default_loc = _accu_conf()
+    if api_key:
+        loc_key, name = _accu_loc_key(default_loc, api_key)
+        cur, _ = _accu_get(f"/currentconditions/v1/{loc_key}", api_key) if loc_key else (None, 0)
+        try:
+            w = (f"{round(float(cur[0]['Temperature']['Imperial']['Value']))}F, "
+                 f"{cur[0].get('WeatherText', '')}")
+        except (KeyError, TypeError, ValueError, IndexError):
+            w = ""
+    else:
+        raw_w = _run(["omarchy-weather-status"])
+        w = _speakable_weather(raw_w)[:120] \
+            if raw_w and "unavailable" not in raw_w.lower() else ""
+    # Homelab, counts only.
+    running = _docker_names()
+    dock = f"{len(running)} containers running" if running or _docker_names(all_containers=True) \
+        else "Docker is quiet"
+    lines = [f"{now.strftime('%A, %B %-d')} — {time_s}",
+             f"Calendar: {cal or 'nothing on the books'}",
+             f"Weather: {w or 'unavailable'}",
+             f"Homelab: {dock}"]
+    speak = (f"{time_s}. {cal[:140] + '.' if cal else 'Nothing on the calendar.'} "
+             f"{w + '.' if w else ''} {dock}.")
+    _touch_interaction()
+    _popup("Morning brief", "\n".join(lines)[:900], timeout_ms=12000)
+    _speak(_with_address(speak[:320], is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
 def try_task_intent(raw: str) -> bool:
     norm = _normalise(raw)
+    mood = _detect_mood(norm)
     # Chit-chat first: greetings must beat every launcher ("hi" != an app).
     if _handle_conversational(norm):
+        return True
+    # Mood persona: banter, co-pilot, rage repair, dry wit.
+    if _handle_moods(norm):
         return True
     # System power: safe ops run now, destructive ones ask first.
     if _handle_system(norm):
@@ -1523,21 +2691,43 @@ def try_task_intent(raw: str) -> bool:
     for handler in (_handle_calc, _handle_spell, _handle_web):
         if handler(norm):
             return True
-    # Window/app control by name, clipboard, screenshot, dictation.
-    for handler in (_handle_windows, _handle_clipboard, _handle_screenshot, _handle_dictation):
+    # Window/app control by name, clipboard, screenshot, computer use, dictation.
+    for handler in (_handle_windows, _handle_clipboard, _handle_screenshot,
+                    _handle_computer, _handle_dictation):
         if handler(norm):
             return True
     # Device controls: media, display, connectivity, system status.
-    for handler in (_handle_media, _handle_display, _handle_connectivity, _handle_sysinfo):
+    # Shazam first: "what song is this" is ambient recognition, not playerctl.
+    for handler in (_handle_shazam, _handle_media, _handle_display, _handle_connectivity, _handle_sysinfo):
         if handler(norm):
             return True
     # Weather — everyday task, popup + spoken. Place names ("in London")
     # route to that location; bare questions use home.
     if re.search(r"\b(weather|forecast|temperature|how (hot|cold|warm|humid)|will it rain|do i need (an? umbrella|a jacket))\b", norm):
         return _handle_weather(norm)
+    # Canvas / NJIT assignments — before calendar, since "what's due" overlaps.
+    if _handle_canvas(norm, raw):
+        return True
     # Calendar / schedule — before generic time, since "what's on today" overlaps.
     if re.search(r"\b(calendar|schedule|my day|what.*on (today|tomorrow|my calendar)|do i have (anything|any meetings)|events|appointments|meetings|what.s next)\b", norm):
         return _handle_calendar(norm)
+    # Morning brief (before calendar: "what's on today" + brief = brief).
+    if re.search(r"\bbrief\b", norm):
+        if _handle_brief(norm):
+            return True
+    # Homelab containers (power handler already claimed system restarts above).
+    # A restart _handle_docker declines ("restart firefox") falls through to
+    # the app launcher / LLM below.
+    if re.search(r"\bdocker\b|containers?\b|jellyfin|radarr|prowlarr|qbittorrent"
+                 r"|\brestart\b|\breboot\b", norm):
+        if _handle_docker(norm):
+            return True
+    # Unity workspace macro.
+    if re.search(r"\bunity\b", norm):
+        return _handle_unity(norm)
+    # Code / text straight to the clipboard (never read aloud).
+    if re.search(r"\bcopy\b", norm) and re.search(r"\bclipboard\b|\bcode\b", norm):
+        return _handle_codecopy(norm, raw)
     # Reminders / timers.
     if re.search(r"\b(remind(er)?|reminder|timer|alarm)\b", norm):
         return _handle_reminder(norm, raw)
@@ -1546,6 +2736,18 @@ def try_task_intent(raw: str) -> bool:
         return _handle_time_date(norm)
     return False
 
+
+# Debug helper: `local-voice-exec --resolve=vlc` prints how a phrase would
+# launch, without launching anything.
+if prompt.startswith("--resolve="):
+    _phrase = prompt[len("--resolve="):].strip().lower()
+    _alias = APP_ALIASES.get(_phrase)
+    print(f"phrase: {_phrase}")
+    print(f"alias: {_alias or '-'}")
+    print(f"on PATH: {'yes' if shutil.which(_phrase) else 'no'}")
+    print(f"desktop scan: {_desktop_binary_for(_phrase) or '-'}")
+    print(f"desktop argv: {_desktop_argv_for(_phrase) or '-'}")
+    sys.exit(0)
 
 # Deterministic intents first: chit-chat + everyday tasks (no hallucination,
 # no launcher misfires — "hi" is a greeting, not Avahi). Then fast app launch,
@@ -1566,6 +2768,9 @@ You run on Omarchy/Arch + Hyprland 0.56 (Lua dispatch API). Map each utterance t
 
 Execution rules:
 - Direct actions map immediately — never narrate instead of acting, never add pleasantries to notify.
+- notify is one short sentence, two max — no filler words, no pleasantries, no introductory phrases. Confirm system actions in three words or less.
+- Never read raw markdown, URLs, or code blocks aloud. Code requests arrive as type="task" with target "code" — the handler copies to clipboard, notify is just "Copied".
+- Schedule questions (calendar target) are answered with only the next immediate event and its time.
 - notify is one short sentence, plain words only (no markdown, symbols, or addresses) — it is spoken aloud.
 - Ambiguous or unsupported: type="none" with notify as a brief clarifying question ("Which app did you mean?") or a plain statement of limits.
 
@@ -1575,14 +2780,22 @@ Task rules (everyday help — prefer these over none):
 - Reminder ("remind me in 5 minutes to ...", "remind me at 7pm") -> {"type": "task", "target": "reminder:5:Check the oven", "notify": "Setting reminder"}
 - Timer ("set a timer for 10 minutes", "pause my timer") -> {"type": "task", "target": "timer", "notify": "On it"}
 - Calendar ("what's on my calendar", "my schedule tomorrow") -> {"type": "task", "target": "calendar", "notify": "Checking your calendar"}
+- Canvas assignments ("how many assignments do I have", "what's left", "did I do ethernet") -> {"type": "task", "target": "canvas", "notify": "Checking Canvas"}
 - Notes ("take a note ...", "show my notes") -> {"type": "task", "target": "notes", "notify": "On it"}
 - Media/volume ("pause", "next track", "volume 80") -> {"type": "task", "target": "media", "notify": "Done"}
+- Ambient song ID ("what song is this", "what's the song", "shazam this") -> {"type": "task", "target": "shazam", "notify": "Listening for music"}
 - Brightness/wifi/bluetooth/battery/disk ("brightness 50", "wifi off") -> {"type": "task", "target": "device", "notify": "Done"}
+- Bluetooth connect ("connect my earbuds", "pair the headphones") -> {"type": "task", "target": "bluetooth", "notify": "Connecting"}
+- Homelab ("check my containers", "restart jellyfin and radarr") -> {"type": "task", "target": "docker", "notify": "On it"}
+- Unity ("set up unity", "open my unity project") -> {"type": "task", "target": "unity", "notify": "Setting up Unity"}
+- Clipboard copy ("copy this code: ...", "copy to clipboard: ...") -> {"type": "task", "target": "code", "notify": "Copied"}
+- Morning brief ("brief me", "morning brief") -> {"type": "task", "target": "brief", "notify": "Pulling the brief"}
 - Math/units ("what is 12 plus 30", "convert 150 F to C") -> {"type": "task", "target": "calc", "notify": "Working it out"}
 - Web/search/translate ("search the web for X", "open YouTube") -> {"type": "task", "target": "web", "notify": "Opening that"}
 - Spelling ("spell idiosyncratic") -> {"type": "task", "target": "spell", "notify": "Spelling it"}
 - Windows by name ("close my browser", "focus my editor") -> {"type": "task", "target": "window", "notify": "On it"}
 - Clipboard/screenshot/dictation ("read my clipboard", "take a screenshot", "type hello") -> {"type": "task", "target": "desk", "notify": "Done"}
+- See/click/type/scroll/keys ("what do you see", "click Save", "scroll down", "press Escape", "type hello and press enter", "open firefox on workspace 3") -> {"type": "computer", "target": "describe|click:Save|scroll:down:3|key:Escape|type:hello|launch:firefox:3", "notify": "On it"}
 
 System rules (safe ops run at once; destructive need the user's spoken yes):
 - Lock screen, wake displays, system stats -> {"type": "system", "target": "lock|wake|stats", "notify": "Locked"}
@@ -1603,8 +2816,9 @@ Dispatch rules (Lua, single table arg or none):
 NEVER use hl.dsp.workspace.change_id — it RENAMES, not switches. NEVER use toggle_floating/toggle_fullscreen — those don't exist.
 
 App rules:
-- type="app" target is JUST the binary name (kitty, dolphin, nautilus, thunar, firefox, chromium, code, spotify, discord) — no Python code, no Popen(), no quotes wrapping, no args unless needed. Example "kitty" not "Popen('kitty')".
-- "open dolphin" / "file manager" / "files" / "folder" -> target "dolphin". "open firefox" / "browser" / "web" -> target "firefox".
+- type="app" target is JUST the binary name (kitty, dolphin, nautilus, thunar, firefox, chromium, code, spotify, discord, obsidian, filezilla, vlc, gimp-3.2, blender) — no Python code, no Popen(), no quotes wrapping, no args unless needed. Example "kitty" not "Popen('kitty')".
+- ANY installed GUI app opens by its spoken name — obsidian, filezilla, vlc, gimp, blender, onlyoffice, prusa-slicer. Never type="none" for an app that exists on the system; when unsure, still emit type="app" with your best-guess binary and the launcher will resolve it via .desktop files.
+- "open dolphin" / "file manager" / "files" / "folder" -> target "dolphin". "open firefox" / "browser" / "web" -> target "firefox". "open gimp" / "image editor" -> target "gimp-3.2". "open vlc" / "video player" -> target "vlc".
 - A bare app noun ("dolphin", "firefox") means open it — never type="none" for a known app.
 - If truly unrecognized, type="none".
 
@@ -1621,10 +2835,20 @@ Examples:
 - "fullscreen" -> {"type": "dispatch", "target": "hl.dsp.window.fullscreen({ mode = \\"fullscreen\\" })", "notify": "Fullscreen"}
 """
 
+_MOOD_TINT = {
+    "frustrated": "User mood: FRUSTRATED — be terse, validate the annoyance once, never grovel or repeat apologies.",
+    "sarcastic": "User mood: SARCASTIC — dry grounded wit is welcome, then stay helpful.",
+    "focus": "User mood: FOCUSED — technical co-pilot tone, precise and supportive.",
+    "casual": "",
+}
+
+_mood_line = _MOOD_TINT.get(_get_mood(), "")
+
 payload = {
     "model": "qwen2.5:3b",
+    "keep_alive": "30m",  # stay loaded between commands: 0.5s, not 5s reload
     "messages": [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": system_prompt + ("\n" + _mood_line if _mood_line else "")},
         {"role": "user", "content": prompt},
     ],
     "format": "json",
@@ -1675,12 +2899,15 @@ try:
             else:
                 target = re.sub(r".*Popen\s*\(\s*['\"]", "", target).strip(" '\")")
         # tolerate wrong type label like "move"
-        if act_type not in ("app", "dispatch", "task", "system", "none"):
+        if act_type not in ("app", "dispatch", "task", "system", "computer", "none"):
             if target.startswith("hl.dsp."):
                 act_type = "dispatch"
             elif (target or "").lower().strip() in {
                     "lock", "wake", "stats", "shutdown", "reboot", "logout"}:
                 act_type = "system"
+            elif re.match(r"^(describe|click|key|scroll|type|launch)\s*:",
+                             target or "", re.I):
+                act_type = "computer"
             elif target and not target.startswith("hl."):
                 act_type = "app"
 
@@ -1701,12 +2928,18 @@ try:
                     target = alias_bin
                     launched = True
                 else:
-                    desk = _desktop_binary_for(phrase) or _desktop_binary_for(target)
-                    if desk and _launch_binary(desk):
-                        target = desk
+                    desk = _desktop_argv_for(phrase) or _desktop_argv_for(target)
+                    if desk and _launch_argv(desk):
+                        target = os.path.basename(desk[0])
                         launched = True
             if not launched:
-                notify = f"Could not open {target or prompt}"
+                # "Shazam" is song recognition, not an app binary — route it
+                # here instead of failing with "Could not open shazam".
+                if "shazam" in norm or "songrec" in (target or "").lower():
+                    _handle_shazam("shazam this")
+                    notify = ""
+                else:
+                    notify = f"Could not open {target or prompt}"
         elif act_type == "none" or (not act_type and not target):
             # Last chance: deterministic lookup before admitting defeat.
             # Covers bare nouns ("dolphin"), synonyms ("file manager"), and any
@@ -1717,6 +2950,12 @@ try:
             hit = APP_ALIASES.get(phrase) or _desktop_binary_for(phrase)
             if hit and _launch_binary(hit):
                 notify = f"Opening {phrase}"
+            elif _launch_argv(_desktop_argv_for(phrase) or []):
+                # Webapps / full-command entries (keeps the URL).
+                notify = f"Opening {phrase}"
+            elif _handle_shazam(phrase):
+                # Song-ID question the matcher missed ("what's the song").
+                notify = ""
             else:
                 # Persona: graceful degrade to a targeted clarifying question.
                 notify = ("I didn't catch that, Sir. Did you want an app, "
@@ -1752,10 +2991,34 @@ try:
             elif t.startswith("calendar"):
                 _handle_calendar(t)
                 notify = ""
+            elif t.startswith("canvas"):
+                _handle_canvas(_normalise(prompt), prompt)
+                notify = ""
+            elif t.startswith("bluetooth"):
+                _handle_connectivity(_normalise(prompt))
+                notify = ""
+            elif t.startswith("docker"):
+                _handle_docker(_normalise(prompt))
+                notify = ""
+            elif t.startswith("unity"):
+                _handle_unity(_normalise(prompt))
+                notify = ""
+            elif t.startswith("code"):
+                _handle_codecopy(_normalise(prompt), prompt)
+                notify = ""
+            elif t.startswith("brief"):
+                _handle_brief(_normalise(prompt))
+                notify = ""
+            elif t.startswith("shazam"):
+                _handle_shazam(_normalise(prompt))
+                notify = ""
             else:
                 # Fall through to deterministic matcher on the original words.
                 if try_task_intent(prompt):
                     notify = ""
+        elif act_type == "computer" and target:
+            # LLM-routed computer-use action (see/click/scroll/keys/launch).
+            notify = _computer_do(target, prompt)
         elif act_type == "dispatch" and target:
             err = validate_dispatch(target)
             if err:

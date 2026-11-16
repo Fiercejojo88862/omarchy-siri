@@ -13,8 +13,8 @@ info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m [!]\033[0m %s\n' "$*"; }
 
 # --- 0. OS tools ---------------------------------------------------------------
-for t in curl ffmpeg pw-record whisper-cli ollama hyprctl notify-send; do
-    command -v "$t" >/dev/null 2>&1 || warn "missing: $t (install it for full function)"
+for t in curl ffmpeg pw-record whisper-cli ollama hyprctl notify-send songrec; do
+    command -v "$t" >/dev/null 2>&1 || warn "missing: $t (install it for full function; songrec = Shazam song ID via sudo pacman -S songrec)"
 done
 
 # --- 1. Scripts -----------------------------------------------------------------
@@ -27,12 +27,13 @@ done
 info "Scripts linked into $BIN."
 
 # --- 2. Python voice stack ---------------------------------------------------------
-# CPU torch first (XTTS runs on CPU; GPU wheels also work).
-pip install --user --break-system-packages torch torchaudio \
-    --index-url https://download.pytorch.org/whl/cpu 2>/dev/null || \
-pip install --user --break-system-packages torch torchaudio
-pip install --user --break-system-packages coqui-tts edge-tts piper-tts
-python3 "$REPO/patches/apply-patches.py"
+# Piper TTS only (offline, sub-second). No torch/coqui chain.
+pip install --user --break-system-packages piper-tts
+
+# --- 2b. Computer use (Hyprland-native desktop control via hypruse) -----------
+# No sudo needed: user-site install. Doctor via `uvx hypruse doctor`.
+pip install --user --break-system-packages hypruse 2>/dev/null || \
+warn "hypruse install failed (computer-use clicks/keys need it)"
 
 # --- 3. Speech-to-text model (whisper.cpp, 142MB) ------------------------------------
 mkdir -p "$MODEL_DIR"
@@ -44,20 +45,32 @@ else
     info "Whisper model present."
 fi
 
-# --- 4. Fallback British TTS voice (Piper, 61MB, offline) ----------------------------
+# --- 4. Siri voice (Piper en_GB-southern_english_female-low, offline) ---------
+# Pitch-matched to the owner's recording against jenny/cori/alba on
+# identical text. Jenny kept as well (previous fallback).
 mkdir -p "$PIPER_DIR"
-if [[ ! -f "$PIPER_DIR/en_GB-jenny_dioco-medium.onnx" ]]; then
-    info "Downloading Piper British voice..."
-    python3 -m piper.download_voices en_GB-jenny_dioco-medium --download-dir "$PIPER_DIR"
-else
-    info "Piper voice present."
-fi
+for v in en_GB-southern_english_female-low en_GB-jenny_dioco-medium; do
+    if [[ ! -f "$PIPER_DIR/$v.onnx" ]]; then
+        info "Downloading Piper voice $v..."
+        python3 -m piper.download_voices "$v" --download-dir "$PIPER_DIR"
+    fi
+done
+info "Piper voices present."
 
 # --- 5. Config templates (never overwrite yours) --------------------------------------
 mkdir -p "$CONF"
 [[ -f "$CONF/calendar.conf" ]] || cp "$REPO/config/calendar.conf.example" "$CONF/calendar.conf"
 [[ -f "$CONF/persona.conf" ]] || cp "$REPO/config/persona.conf.example" "$CONF/persona.conf"
-chmod 600 "$CONF/calendar.conf" 2>/dev/null || true
+if [[ ! -f "$CONF/weather.conf" ]]; then
+    cat > "$CONF/weather.conf" <<'EOF'
+# AccuWeather (optional): free key from developer.accuweather.com unlocks
+# AccuWeather current + 12h outdoor analytics + activity indices.
+# Without it, weather stays on the built-in wttr.in path.
+ACCUWEATHER_API_KEY=
+ACCU_LOCATION=Matawan
+EOF
+fi
+chmod 600 "$CONF/calendar.conf" "$CONF/weather.conf" 2>/dev/null || true
 info "Config templates in $CONF (edit calendar.conf with your iCloud links)."
 
 # --- 6. Apple Calendar desktop entry ---------------------------------------------------
@@ -81,6 +94,6 @@ info "Add this line to ~/.config/hypr/bindings.lua, then: hyprctl reload"
 echo '  o.bind("Insert", "Voice: talk / send", "local-voice toggle")'
 echo '  (see hypr/bindings-voice.lua)'
 echo
-info "Done. Press INS to talk. First run downloads the XTTS-v2 model (~2GB)."
-info "Clone your voice: record 25s of clean speech as ~/.local/share/voice-clone/siri_ref_25s.wav"
-info "Note: XTTS-v2 is CPML-licensed (free for non-commercial use)."
+info "Computer-use panic key (kills hypruse mid-action, safe): bind SUPER+SHIFT+Backspace to: pkill -f hypruse"
+echo
+info "Done. Press INS to talk. Voice is Piper southern-English female (offline, instant)."

@@ -74,11 +74,13 @@ stop_recording() {
     (
         # whisper hygiene: collapse newlines, trim, drop trailing punctuation
         # so "Dolphin." -> "Dolphin" and bare nouns survive to the fallback.
-        TEXT=$(whisper-cli -m "$MODEL" -f "$AUDIOFILE" -t 4 --no-timestamps -nt 2>/dev/null | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[.?!,;:]*$//')
+        TEXT=$(whisper-cli -m "$MODEL" -f "$AUDIOFILE" -t 8 --no-timestamps -nt 2>/dev/null | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[.?!,;:]*$//')
         rm -f "$AUDIOFILE"
         if [[ -z "$TEXT" ]]; then
-            notify-send -t 1500 "Voice" "No speech detected" 2>/dev/null || true
-            exit 0
+            # No speech heard — music may be playing instead. Fall through to
+            # Shazam automatically (records its own fresh sample in exec).
+            notify-send -t 1500 "Voice" "No speech — listening for music..." 2>/dev/null || true
+            exec ~/.local/bin/local-voice-exec "shazam this"
         fi
         # show what was heard for 1s, then dispatch
         notify-send -t 1200 "Voice" "Heard: $TEXT" 2>/dev/null || true

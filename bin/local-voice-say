@@ -1,55 +1,9 @@
 #!/usr/bin/env bash
-# local-voice-say — speak in YOUR Siri British voice (XTTS-v2 clone of your recording).
+# local-voice-say — speak in Siri's voice (Piper southern English female).
 # Usage: local-voice-say "Opening dolphin!"
-# Cache by text hash in ~/.local/share/voice-clone/cache/ so repeats play instantly.
-# Miss policy: speak the fast fallback voice NOW (never silence), and generate
-# the clone in the background for next time. Clone gen takes ~30s on CPU and
-# must never block speech — a previous version waited on a lock and went quiet.
+# Thin wrapper over local-voice-tts; synthesis is sub-second so no cache,
+# no background generation, no fallback chain.
 set -euo pipefail
 TEXT="${*:-}"
 [[ -z "$TEXT" ]] && exit 0
-TEXT="$(echo "$TEXT" | cut -c1-280)"
-
-CACHE_DIR="$HOME/.local/share/voice-clone/cache"
-REF="$HOME/.local/share/voice-clone/siri_ref_25s.wav"
-LOCK="$HOME/.local/share/voice-clone/gen.lock"
-mkdir -p "$CACHE_DIR"
-
-HASH="$(echo -n "$TEXT" | sha256sum | cut -c1-16)"
-CACHED="$CACHE_DIR/$HASH.wav"
-
-play() {
-    # </dev/null: a background player inheriting a dispatch pipe keeps the
-    # caller waiting and risks SIGTTIN; detached fds play and vanish.
-    if command -v pw-play >/dev/null 2>&1; then
-        pw-play "$1" </dev/null >/dev/null 2>&1 &
-        disown 2>/dev/null || true
-    elif command -v paplay >/dev/null 2>&1; then
-        paplay "$1" </dev/null >/dev/null 2>&1 &
-        disown 2>/dev/null || true
-    fi
-}
-
-# Instant on repeats — her exact voice.
-if [[ -f "$CACHED" ]]; then
-    play "$CACHED"
-    exit 0
-fi
-
-# Miss: speak NOW via the fast chain so there is never silence...
-VOICE_CLONE_FALLBACK=1 "$HOME/.local/bin/local-voice-tts" "$TEXT" </dev/null >/dev/null 2>&1 &
-disown 2>/dev/null || true
-
-# ...and teach the clone in the background for next time. Non-blocking lock:
-# if another generation is running, skip — a later hearing will retry.
-(
-    exec 9>"$LOCK" 2>/dev/null || exit 0
-    flock -n 9 2>/dev/null || exit 0
-    [[ -f "$CACHED" ]] && exit 0
-    # Recipe C (your pick): temp 0.65 + native speed 1.08 via local-voice-clone.
-    if [[ -f "$REF" ]] && [[ -x "$HOME/.local/bin/local-voice-clone" ]]; then
-        timeout 300 "$HOME/.local/bin/local-voice-clone" "$TEXT" "$REF" "$CACHED" >/dev/null 2>&1 && exit 0
-    fi
-) </dev/null >/dev/null 2>&1 &
-disown 2>/dev/null || true
-exit 0
+exec "$HOME/.local/bin/local-voice-tts" "$TEXT"

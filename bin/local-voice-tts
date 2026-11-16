@@ -1,86 +1,42 @@
 #!/usr/bin/env bash
-# local-voice-tts — high-res enthusiastic solid British voice (natural, never says "enthusiastic")
-# Priority: 1) Edge en-GB-LibbyNeural (most upbeat British, natural lift) mastered to 48k/24-bit
-#           2) Piper en_GB-jenny offline mastered to 48k/24-bit
-#           3) espeak fallback
-# Enthusiasm is prosody (rate/pitch/energy), not a spoken word. Solid = warmth + presence + loudnorm.
+# local-voice-tts — Siri voice: Piper en_GB-southern_english_female-low.
+# Stock British female voice pitch-matched to your recording (median F0 and
+# range overlap beat jenny/cori/alba on identical text). Single engine:
+# offline, sub-second, no warm-up, no background jobs.
 set -euo pipefail
 TEXT="${*:-}"
 [[ -z "$TEXT" ]] && exit 0
 TEXT="$(echo "$TEXT" | cut -c1-280)"
 
-# 0) YOUR Siri British voice (XTTS-v2 clone of your recording) — primary.
-# local-voice-say caches by text hash so repeats are instant; it falls back
-# here (with VOICE_CLONE_FALLBACK set) when the clone engine is unavailable.
-if [[ -z "${VOICE_CLONE_FALLBACK:-}" ]] && [[ -x "$HOME/.local/bin/local-voice-say" ]]; then
-    "$HOME/.local/bin/local-voice-say" "$TEXT" </dev/null >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-    exit 0
-fi
-RAW_MP3="/tmp/voice_tts_raw.mp3"
+VOICE_MODEL="$HOME/.local/share/piper/en_GB-southern_english_female-low.onnx"
+# Delivery: speedy + bright + lively. Tune these three to taste.
+RATE=0.85    # piper length-scale: lower = faster (1.0 is model default)
+ENERGY=0.8   # piper noise-scale: higher = more expressive (default 0.667)
+LIFT=1.07    # rubberband pitch lift: higher = brighter, tempo untouched
 RAW_WAV="/tmp/voice_tts_raw.wav"
 HIRES="/tmp/voice_tts_hires.wav"
 
-# Master any TTS wav/mp3 to 48kHz 24-bit: resample + gentle warmth + loudness.
-# Transparent on purpose — the old exciter/compressor chain added harsh rasp.
-# $1 input, $2 output. Returns 0 on success.
-master_hires() {
-    local in="$1" out="$2"
-    command -v ffmpeg >/dev/null 2>&1 || return 1
-    [[ -f "$in" ]] || return 1
-    ffmpeg -v error -y -i "$in" -af \
-"aresample=48000:resampler=soxr:precision=28:cheby=1,highpass=f=70,equalizer=f=150:width_type=o:width=1:gain=1.5,loudnorm=I=-16:TP=-1.5:LRA=7" \
--ar 48000 -ac 2 -c:a pcm_s24le "$out" 2>/dev/null
-}
+command -v piper >/dev/null 2>&1 || { notify-send -t 2500 "Voice" "piper not installed" 2>/dev/null || true; exit 1; }
+[[ -f "$VOICE_MODEL" ]] || { notify-send -t 2500 "Voice" "southern voice missing (re-run install.sh)" 2>/dev/null || true; exit 1; }
 
-play_hires() {
-    local f="$1"
-    [[ -f "$f" ]] || return 1
-    if command -v pw-play >/dev/null 2>&1; then
-        pw-play "$f" </dev/null >/dev/null 2>&1 &
-        disown 2>/dev/null || true
-        return 0
+# Master to 48kHz 24-bit: pitch lift + resample + gentle warmth + loudness.
+if command -v ffmpeg >/dev/null 2>&1; then
+    if echo "$TEXT" | piper --model "$VOICE_MODEL" --length-scale "$RATE" --noise-scale "$ENERGY" --output_file "$RAW_WAV" >/dev/null 2>&1; then
+        ffmpeg -v error -y -i "$RAW_WAV" -af \
+"rubberband=pitch=$LIFT,aresample=48000:resampler=soxr:precision=28:cheby=1,highpass=f=70,equalizer=f=150:width_type=o:width=1:gain=1.5,loudnorm=I=-16:TP=-1.5:LRA=7" \
+-ar 48000 -ac 2 -c:a pcm_s24le "$HIRES" 2>/dev/null && RAW_WAV="$HIRES"
     fi
-    if command -v paplay >/dev/null 2>&1; then
-        paplay "$f" </dev/null >/dev/null 2>&1 &
-        disown 2>/dev/null || true
-        return 0
-    fi
-    return 1
-}
-
-# 1) Edge British Libby — naturally upbeat female, lifted prosody for enthusiasm.
-# rate +12% = energetic but clear, pitch +5Hz = bright, volume +12% = solid presence.
-if [[ -x "$HOME/.local/bin/edge-tts" ]] || command -v edge-tts >/dev/null 2>&1; then
-    EDGE_BIN="${HOME}/.local/bin/edge-tts"
-    [[ -x "$EDGE_BIN" ]] || EDGE_BIN="$(command -v edge-tts)"
-    if timeout 8 "$EDGE_BIN" --voice en-GB-LibbyNeural --rate +12% --pitch +5Hz --volume +12% --text "$TEXT" --write-media "$RAW_MP3" >/dev/null 2>&1; then
-        if master_hires "$RAW_MP3" "$HIRES"; then
-            play_hires "$HIRES" && exit 0
-        fi
-        play_hires "$RAW_MP3" && exit 0
-    fi
+else
+    echo "$TEXT" | piper --model "$VOICE_MODEL" --length-scale "$RATE" --noise-scale "$ENERGY" --output_file "$RAW_WAV" >/dev/null 2>&1 || exit 1
 fi
 
-# 2) Piper offline jenny — slightly quickened for energy, then same solid mastering.
-if command -v piper >/dev/null 2>&1 && [[ -f "$HOME/.local/share/piper/en_GB-jenny_dioco-medium.onnx" ]]; then
-    if echo "$TEXT" | piper --model "$HOME/.local/share/piper/en_GB-jenny_dioco-medium.onnx" --length-scale 0.92 --noise-scale 0.72 --output_file "$RAW_WAV" >/dev/null 2>&1; then
-        if master_hires "$RAW_WAV" "$HIRES"; then
-            play_hires "$HIRES" && exit 0
-        fi
-        play_hires "$RAW_WAV" && exit 0
-    fi
-fi
-
-# 3) Fallback robotic
-if command -v espeak-ng >/dev/null 2>&1; then
-    espeak-ng -v en-gb -s 172 -a 85 "$TEXT" </dev/null >/dev/null 2>&1 &
+# Detached playback: a player inheriting a dispatch pipe keeps the caller
+# waiting and risks SIGTTIN — detached fds play and vanish.
+if command -v pw-play >/dev/null 2>&1; then
+    pw-play "$RAW_WAV" </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
-    exit 0
-fi
-if command -v espeak >/dev/null 2>&1; then
-    espeak -v en-gb -s 172 "$TEXT" </dev/null >/dev/null 2>&1 &
+elif command -v paplay >/dev/null 2>&1; then
+    paplay "$RAW_WAV" </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
-    exit 0
 fi
 exit 0

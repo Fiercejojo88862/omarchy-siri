@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Generate one utterance in YOUR Siri British voice (XTTS-v2, recipe C).
+"""Generate one utterance in YOUR Siri voice (XTTS-v2, recipe D).
 Usage: local-voice-clone "<text>" <reference.wav> <output.wav>
-Recipe C (user-picked winner): temperature 0.65 (stable, no warble),
-native speed 1.08 (lively without atempo artifacts), transparent 48k master.
+Recipe D: temperature 0.5 (stable, no rasp/warble), native speed 1.0
+(speed-ups thin the voice and age it), transparent 48k master.
+Reference must be the DENOISED siri_ref_25s.wav (orig kept as .orig.wav).
 """
 import os
 import subprocess
@@ -23,7 +24,7 @@ model = tts.synthesizer.tts_model
 gpt_latent, spk_emb = model.get_conditioning_latents(audio_path=[ref])
 with torch.no_grad():
     result = model.inference(text, "en", gpt_latent, spk_emb,
-                             temperature=0.65, speed=1.08,
+                             temperature=0.5, speed=1.0,
                              top_k=50, top_p=0.85)
 wav = result["wav"]
 if isinstance(wav, np.ndarray):
