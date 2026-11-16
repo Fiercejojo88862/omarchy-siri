@@ -33,6 +33,75 @@ except OSError:
 CONFIG_DIR = Path.home() / ".config/voice-assistant"
 CONFIG_EXAMPLES = Path(__file__).resolve().parent.parent / "config"
 
+# --- rehearsal: route for real, touch nothing ---------------------------------
+# VOICE_REHEARSAL=1 makes the router decide exactly as it normally would while
+# nothing is executed: no process is spawned, no URL is fetched, no audio is
+# synthesized, hypruse is never imported. Used by --selftest and benchmarks.
+REHEARSAL = os.environ.get("VOICE_REHEARSAL") == "1"
+
+
+class _FakeProc:
+    """Stand-in for a Popen in rehearsal mode."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.pid = 0
+        self.returncode = 0
+        self.stdin = _FakePipe()
+        self.stdout = _FakePipe()
+        self.stderr = _FakePipe()
+
+    def wait(self, *a, **k):
+        return 0
+
+    def poll(self):
+        return 0
+
+    def communicate(self, *a, **k):
+        return ("", "")
+
+    def kill(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakePipe:
+    def write(self, *a):
+        return 0
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+    def read(self, *a):
+        return ""
+
+
+def _install_rehearsal_stubs() -> None:
+    def fake_run(argv, *a, **k):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def fake_popen(argv, *a, **k):
+        return _FakeProc(argv)
+
+    def fake_urlopen(*a, **k):
+        raise urllib.error.URLError("rehearsal")
+
+    subprocess.run = fake_run
+    subprocess.Popen = fake_popen
+    urllib.request.urlopen = fake_urlopen
+
+
+if REHEARSAL:
+    _install_rehearsal_stubs()
+
 
 def init_config() -> int:
     """Write any missing config file from the shipped example, mode 600.
@@ -62,6 +131,172 @@ def init_config() -> int:
 
 if prompt == "--init-config":
     sys.exit(init_config())
+
+
+# --- selftest: deterministic routing golden file ------------------------------
+# Each case runs in a child process with a throwaway HOME and XDG_RUNTIME_DIR, so
+# state (timers, notes, moods, joke rotation, pending confirmations) always
+# starts empty, and VOICE_REHEARSAL guarantees nothing is executed. The output is
+# therefore byte-stable, which is what makes the module split verifiable.
+SELFTEST_CASES = (
+    # the everyday 20
+    "open firefox",
+    "open terminal",
+    "open dolphin",
+    "hi",
+    "what's the weather",
+    "weather in london",
+    "will it rain tomorrow",
+    "what time is it",
+    "what's the date",
+    "set a timer for 10 minutes for pizza",
+    "how much time left on my timer",
+    "remind me in 5 minutes to check the oven",
+    "check my containers",
+    "volume 30",
+    "mute",
+    "next song",
+    "what song is this",
+    "take a note: buy milk",
+    "show my notes",
+    "what's on my calendar",
+    # coverage: one per handler family
+    "brief me",
+    "what do you see",
+    "scroll down 5",
+    "press escape",
+    "click save",
+    "type hello and press enter",
+    "type hello",
+    "go to workspace 2",
+    "make it floating",
+    "move this to workspace 4",
+    "close this window",
+    "fullscreen",
+    "close my browser",
+    "focus my editor",
+    "lock the screen",
+    "reboot",
+    "yes",
+    "no",
+    "tell me a joke",
+    "fun fact",
+    "spell idiosyncratic",
+    "what is 12 plus 30",
+    "convert 150 fahrenheit to celsius",
+    "18% tip on 45",
+    "how do you say good morning in spanish",
+    "search the web for llamas",
+    "open youtube",
+    "copy this code: print(1)",
+    "read my clipboard",
+    "take a screenshot",
+    "check my battery",
+    "disk space",
+    "wifi off",
+    "connect my earbuds",
+    "bluetooth devices",
+    "night light on",
+    "brightness 40",
+    "set up unity",
+    "how many assignments do i have",
+    "what's next on my calendar",
+    "stop talking",
+    "speak again",
+    "who are you",
+    "thanks",
+    "restart jellyfin",
+    "system stats",
+    "what's the weather in tokyo",
+    "time in tokyo",
+)
+
+GOLDEN_FILE = Path(__file__).resolve().parent.parent / "tests" / "golden.txt"
+
+
+_MONTH = (r"(?:January|February|March|April|May|June|July|August|September"
+          r"|October|November|December)")
+_WEEKDAY = (r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)")
+
+
+def _scrub(text: str) -> str:
+    """Mask the values that legitimately change between runs.
+
+    Clock, date and free disk are the only moving parts; everything else must
+    match byte-for-byte, and that equality is what proves a refactor changed
+    nothing.
+    """
+    text = re.sub(r"\b\d{1,2}:\d{2}\s*(?:AM|PM)\b", "<time>", text, flags=re.I)
+    text = re.sub(r"\b\d{1,2}:\d{2}:\d{2}\b", "<time>", text)
+    text = re.sub(rf"\b{_WEEKDAY},?\s+{_MONTH}\s+\d{{1,2}}(?:,?\s*\d{{4}})?",
+                  "<date>", text)
+    text = re.sub(rf"\b{_MONTH}\s+\d{{1,2}}(?:,?\s*\d{{4}})?", "<date>", text)
+    text = re.sub(r"\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\]", "[<timestamp>]", text)
+    text = re.sub(r"[\d.]+G free of [\d.]+G \([\d.]+G used\)", "<disk>", text)
+    text = re.sub(r"[\d.]+ gigabytes free", "<disk> gigabytes free", text)
+    return text.strip()
+
+
+def selftest(update: bool = False) -> int:
+    import difflib
+    import tempfile
+
+    sandbox = tempfile.mkdtemp(prefix="voice-selftest-")
+    # Helpers are discovered under $HOME/.local/bin. Point that at the real one
+    # so translation/calendar/canvas routing is exercised; they are only ever
+    # *called* through the rehearsal stubs, which spawn nothing.
+    try:
+        (Path(sandbox) / ".local").mkdir()
+        os.symlink(Path.home() / ".local/bin", Path(sandbox) / ".local/bin")
+    except OSError:
+        pass
+    env = dict(os.environ)
+    env.update({"HOME": sandbox, "XDG_RUNTIME_DIR": sandbox,
+                "VOICE_REHEARSAL": "1", "VOICE_ECHO": "1", "VOICE_DRYRUN": "1"})
+    try:
+        records = []
+        # Keep every case mid-conversation so the honorific never depends on how
+        # fast the previous child exited (it would otherwise reappear after any
+        # 180 s stall and make the golden flaky). Forced persona lines
+        # (errors, confirmations) still show it.
+        state = Path(sandbox) / ".local/state/voice-assistant"
+        state.mkdir(parents=True, exist_ok=True)
+        for phrase in SELFTEST_CASES:
+            (state / "last_interaction").write_text(str(time.time()))
+            try:
+                proc = subprocess.run(
+                    [sys.executable, os.path.abspath(__file__), phrase],
+                    capture_output=True, text=True, timeout=60, env=env)
+                out = _scrub(proc.stdout)
+                if proc.returncode not in (0, 1):
+                    out += f"\nEXIT\t{proc.returncode}\n{_scrub(proc.stderr)[:600]}"
+            except Exception as exc:  # noqa: BLE001
+                out = f"ERROR\t{type(exc).__name__}: {exc}"
+            records.append(f"## {phrase}\n{out or '(no output)'}")
+        body = "\n\n".join(records) + "\n"
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+    if update or not GOLDEN_FILE.is_file():
+        GOLDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        GOLDEN_FILE.write_text(body)
+        print(f"selftest: wrote {GOLDEN_FILE} ({len(SELFTEST_CASES)} cases)")
+        return 0
+    old = GOLDEN_FILE.read_text()
+    if old == body:
+        print(f"selftest: PASS — {len(SELFTEST_CASES)} cases match {GOLDEN_FILE.name}")
+        return 0
+    diff = list(difflib.unified_diff(old.splitlines(), body.splitlines(),
+                                     "golden", "current", lineterm="", n=1))
+    print("\n".join(diff[:160]))
+    changed = sum(1 for line in diff
+                  if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+    print(f"\nselftest: FAIL — {changed} changed lines")
+    return 1
+
+
+if prompt == "--selftest":
+    sys.exit(selftest(update="--update" in sys.argv[2:]))
 
 # --- deterministic app resolution (fast-path, no LLM) -----------------------
 # Whisper often returns a bare noun ("dolphin") or a phrase the LLM was never
@@ -220,7 +455,7 @@ def _with_address(text: str, *, force: str = "", is_start: bool = False) -> str:
 def _popup(headline: str, body: str = "", glyph: str = "", timeout_ms: int = 8000) -> None:
     """Written response in a popup. Prefers omarchy-notification-send, falls back to notify-send."""
     if os.environ.get("VOICE_ECHO"):
-        print(f"POPUP\t{headline}\t{body}", file=sys.stderr)
+        print(f"POPUP\t{headline}\t{body}")
     if os.environ.get("VOICE_DRYRUN"):
         return
     if shutil.which("omarchy-notification-send"):
@@ -314,7 +549,7 @@ def _speak(text: str) -> None:
     # VOICE_ECHO prints what would be said (used by --selftest and benchmarks);
     # VOICE_DRYRUN additionally stops the audio so tests stay silent.
     if os.environ.get("VOICE_ECHO"):
-        print(f"SPEAK\t{text}", file=sys.stderr)
+        print(f"SPEAK\t{text}")
     if os.environ.get("VOICE_DRYRUN"):
         return
     # Via local-voice-say (Piper, offline, sub-second). Fire-and-forget: the
@@ -349,6 +584,9 @@ def _launch_binary(binary: str) -> bool:
         return False
     if shutil.which(argv[0]) is None:
         return False
+    if REHEARSAL:
+        print(f"LAUNCH\t{' '.join(argv)}")
+        return True
     try:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -414,6 +652,9 @@ def _desktop_argv_for(query: str) -> list[str] | None:
 def _launch_argv(argv: list[str]) -> bool:
     if not argv:
         return False
+    if REHEARSAL:
+        print(f"LAUNCH\t{' '.join(argv)}")
+        return True
     try:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -1870,6 +2111,9 @@ def _handle_spell(norm: str) -> bool:
 
 
 def _open_url(url: str) -> bool:
+    if REHEARSAL:
+        print(f"URL\t{url}")
+        return True
     if shutil.which("firefox"):
         subprocess.Popen(["firefox", "--new-window", url], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1949,12 +2193,13 @@ def _handle_web(norm: str) -> bool:
         if _open_url("https://www.youtube.com"):
             _confirm("YouTube is open — I can't reach your playlists offline, Sir.")
             return True
-    # Translation lives in _handle_translate (local engines only, no Google).
     # General web search: results on screen (can't read the web offline).
-    m = re.search(r"\bsearch (the web )?for (.+)|google (.+)|look up (.+)|who won (.+)|define (\w+)\b", norm)
+    # The optional prefixes are non-capturing so the query itself is the only
+    # group that can match first ("search the web for llamas" used to search
+    # for the words "the web").
+    m = re.search(r"\bsearch (?:the web )?(?:for )?(.+)|google (.+)|look up (.+)|who won (.+)|define (\w+)\b", norm)
     if m:
-        q = next(g for g in m.groups() if g)
-        q = q.strip()[:160]
+        q = next((g for g in m.groups() if g), "").strip()[:160]
         if _open_url(f"https://duckduckgo.com/?q={quote_plus(q)}"):
             _confirm(f"I opened results for {q[:60]}.")
             return True
@@ -2096,6 +2341,10 @@ _HYPRUSE_TRIED = False
 def _hypruse():
     """Import hypruse server tools, or None when not installed."""
     global _HYPRUSE_MOD, _HYPRUSE_TRIED
+    if REHEARSAL:
+        # Never import desktop control during a selftest: the rehearsal must
+        # not be able to click, type or read anything.
+        return None
     if not _HYPRUSE_TRIED:
         _HYPRUSE_TRIED = True
         try:
@@ -2137,6 +2386,8 @@ def _computer_call(fn_name: str, *args, **kwargs) -> str:
 def _computer_describe() -> bool:
     """Speak + pop up what's on screen: workspaces, windows, focused controls."""
     try:
+        if REHEARSAL:
+            raise RuntimeError("screen reading is disabled in rehearsal")
         from hypruse.server import desktop, ui
         d = desktop()
         wins = d.get("windows", []) if isinstance(d, dict) else []
@@ -2851,6 +3102,36 @@ def try_task_intent(raw: str) -> bool:
     return False
 
 
+# --- rehearsal tracing -------------------------------------------------------
+# Wrap every handler so --selftest records which one claimed each phrase. This
+# is what makes the module split checkable: routing must stay byte-identical, so
+# a handler that is moved and stops matching shows up as a changed HANDLER line.
+if REHEARSAL:
+    def _traced(fn):
+        label = fn.__name__.removeprefix("_handle_")
+
+        def wrapper(*args, **kwargs):
+            hit = fn(*args, **kwargs)
+            if hit:
+                print(f"HANDLER\t{label}")
+            return hit
+
+        wrapper.__name__ = fn.__name__
+        return wrapper
+
+    for _name, _obj in list(globals().items()):
+        if _name.startswith("_handle_") and callable(_obj):
+            globals()[_name] = _traced(_obj)
+
+    _fast_launch_impl = try_fast_launch
+
+    def try_fast_launch(raw: str) -> bool:  # noqa: F811 — deliberate rehearsal wrap
+        hit = _fast_launch_impl(raw)
+        if hit:
+            print("HANDLER\tlaunch")
+        return hit
+
+
 # Debug helper: `local-voice-exec --resolve=vlc` prints how a phrase would
 # launch, without launching anything.
 if prompt.startswith("--resolve="):
@@ -2989,6 +3270,12 @@ def validate_dispatch(lua: str) -> str | None:
 
 
 try:
+    if REHEARSAL:
+        # Record that this utterance fell through every handler to the model,
+        # then stop before any network I/O. The golden file then shows exactly
+        # which sentences need the LLM.
+        print(f"LLM\t{payload['model']}")
+        sys.exit(0)
     req = urllib.request.Request(
         "http://127.0.0.1:11434/api/chat",
         data=json.dumps(payload).encode("utf-8"),

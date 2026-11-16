@@ -1,0 +1,333 @@
+## open firefox
+LAUNCH	firefox
+POPUP	Voice Assistant	Opening firefox
+SPEAK	Opening firefox
+HANDLER	launch
+
+## open terminal
+LAUNCH	kitty
+POPUP	Voice Assistant	Opening terminal
+SPEAK	Opening terminal
+HANDLER	launch
+
+## open dolphin
+LAUNCH	dolphin
+POPUP	Voice Assistant	Opening dolphin
+SPEAK	Opening dolphin
+HANDLER	launch
+
+## hi
+POPUP	Voice Assistant	Hey! What can I do for you?
+SPEAK	Hey! What can I do for you?
+HANDLER	conversational
+
+## what's the weather
+POPUP	Voice Assistant	Sorry, I couldn't reach the weather service.
+SPEAK	Sorry, I couldn't reach the weather service.
+HANDLER	weather
+
+## weather in london
+POPUP	Weather	Sir, Sorry, I couldn't find the weather for london.
+SPEAK	Sir, Sorry, I couldn't find the weather for london.
+HANDLER	weather
+
+## will it rain tomorrow
+POPUP	Weather	Sir, Sorry, I couldn't reach the forecast for here.
+SPEAK	Sir, Sorry, I couldn't reach the forecast for here.
+HANDLER	forecast
+HANDLER	weather
+
+## what time is it
+POPUP	Voice Assistant	It's <time>.
+SPEAK	It's <time>.
+HANDLER	time_date
+
+## what's the date
+POPUP	Voice Assistant	It's <date>.
+SPEAK	It's <date>.
+HANDLER	time_date
+
+## set a timer for 10 minutes for pizza
+POPUP	Voice Assistant	Timer set for 10 minutes: pizza.
+SPEAK	Timer set for 10 minutes: pizza.
+HANDLER	timers
+
+## how much time left on my timer
+POPUP	Timers	pizza: 9 minutes left (running)
+SPEAK	9 minutes left on pizza.
+HANDLER	timers
+
+## remind me in 5 minutes to check the oven
+POPUP	Voice Assistant	Done! I'll remind you in 5 minutes: check the oven.
+SPEAK	Done! I'll remind you in 5 minutes: check the oven.
+HANDLER	reminder
+
+## check my containers
+POPUP	Voice Assistant	Docker isn't responding — the daemon may be down.
+SPEAK	Docker isn't responding — the daemon may be down.
+HANDLER	docker
+
+## volume 30
+LLM	qwen2.5:3b
+
+## mute
+POPUP	Voice Assistant	Muted.
+SPEAK	Muted.
+HANDLER	media
+
+## next song
+POPUP	Voice Assistant	Nothing is playing right now.
+SPEAK	Nothing is playing right now.
+HANDLER	media
+
+## what song is this
+POPUP	Shazam	Listening for music…
+POPUP	Voice Assistant	I didn't hear any music — try again.
+SPEAK	I didn't hear any music — try again.
+HANDLER	shazam
+
+## take a note: buy milk
+POPUP	Voice Assistant	Noted.
+SPEAK	Noted.
+HANDLER	notes
+
+## show my notes
+POPUP	Notes	- [<timestamp>] buy milk
+SPEAK	1 note. Latest: buy milk.
+HANDLER	notes
+
+## what's on my calendar
+POPUP	Voice Assistant	Your calendar isn't connected yet — add your Apple Calendar link in calendar settings, Sir.
+SPEAK	Your calendar isn't connected yet — add your Apple Calendar link in calendar settings, Sir.
+HANDLER	calendar
+
+## brief me
+POPUP	Morning brief	<date> — <time>
+Calendar: nothing on the books
+Weather: unavailable
+Homelab: Docker is quiet
+SPEAK	<time>. Nothing on the calendar.  Docker is quiet.
+HANDLER	brief
+
+## what do you see
+POPUP	Voice Assistant	Sorry, I couldn't read the screen: screen reading is disabled in rehearsal
+SPEAK	Sorry, I couldn't read the screen: screen reading is disabled in rehearsal
+HANDLER	computer
+
+## scroll down 5
+POPUP	Voice Assistant	Sorry, scrolling didn't work: computer control isn't installed (run ./install.sh)
+SPEAK	Sorry, scrolling didn't work: computer control isn't installed (run ./install.sh)
+HANDLER	computer
+
+## press escape
+POPUP	Voice Assistant	Sorry, that key didn't work: computer control isn't installed (run ./install.sh)
+SPEAK	Sorry, that key didn't work: computer control isn't installed (run ./install.sh)
+HANDLER	computer
+
+## click save
+POPUP	Voice Assistant	Sorry, that click didn't work: computer control isn't installed (run ./install.sh)
+SPEAK	Sorry, that click didn't work: computer control isn't installed (run ./install.sh)
+HANDLER	computer
+
+## type hello and press enter
+POPUP	Voice Assistant	Sorry, that didn't work: computer control isn't installed (run ./install.sh)
+SPEAK	Sorry, that didn't work: computer control isn't installed (run ./install.sh)
+HANDLER	computer
+
+## type hello
+POPUP	Voice Assistant	Typed.
+SPEAK	Typed.
+HANDLER	dictation
+
+## go to workspace 2
+LLM	qwen2.5:3b
+
+## make it floating
+LLM	qwen2.5:3b
+
+## move this to workspace 4
+LLM	qwen2.5:3b
+
+## close this window
+LLM	qwen2.5:3b
+
+## fullscreen
+LLM	qwen2.5:3b
+
+## close my browser
+POPUP	Voice Assistant	I don't see browser open.
+SPEAK	I don't see browser open.
+HANDLER	windows
+
+## focus my editor
+POPUP	Voice Assistant	I don't see editor open.
+SPEAK	I don't see editor open.
+HANDLER	windows
+
+## lock the screen
+POPUP	Voice Assistant	Locked.
+SPEAK	Locked.
+HANDLER	system
+
+## reboot
+POPUP	Confirm	Sir, This will close everything. Say yes to confirm reboot, or no to cancel.
+SPEAK	Sir, This will close everything. Say yes to confirm reboot, or no to cancel.
+HANDLER	system
+
+## yes
+POPUP	Voice Assistant	Rebooting now.
+SPEAK	Rebooting now.
+HANDLER	conversational
+
+## no
+POPUP	Voice Assistant	No problem.
+SPEAK	No problem.
+HANDLER	conversational
+
+## tell me a joke
+POPUP	Voice Assistant	Why do programmers prefer dark mode? Because light attracts bugs!
+SPEAK	Why do programmers prefer dark mode? Because light attracts bugs!
+HANDLER	conversational
+
+## fun fact
+POPUP	Voice Assistant	Honey never spoils. Archaeologists found edible 3,000-year-old honey in Egyptian tombs.
+SPEAK	Honey never spoils. Archaeologists found edible 3,000-year-old honey in Egyptian tombs.
+HANDLER	conversational
+
+## spell idiosyncratic
+POPUP	Spelling	idiosyncratic: I-D-I-O-S-Y-N-C-R-A-T-I-C
+SPEAK	idiosyncratic: I-D-I-O-S-Y-N-C-R-A-T-I-C.
+HANDLER	spell
+
+## what is 12 plus 30
+POPUP	Voice Assistant	That's 42.
+SPEAK	That's 42.
+HANDLER	calc
+
+## convert 150 fahrenheit to celsius
+POPUP	Voice Assistant	150 fahrenheit is 65.56 celsius.
+SPEAK	150 fahrenheit is 65.56 celsius.
+HANDLER	calc
+
+## 18% tip on 45
+LLM	qwen2.5:3b
+
+## how do you say good morning in spanish
+POPUP	Translation	no engine answered
+SPEAK	Sorry, no local translator answered that.
+HANDLER	translate
+
+## search the web for llamas
+URL	https://duckduckgo.com/?q=llamas
+POPUP	Voice Assistant	I opened results for llamas.
+SPEAK	I opened results for llamas.
+HANDLER	web
+
+## open youtube
+URL	https://www.youtube.com
+POPUP	Voice Assistant	YouTube is open.
+SPEAK	YouTube is open.
+HANDLER	web
+
+## copy this code: print(1)
+POPUP	Voice Assistant	Code copied to clipboard.
+SPEAK	Code copied to clipboard.
+HANDLER	codecopy
+
+## read my clipboard
+POPUP	Voice Assistant	Clipboard is empty.
+SPEAK	Clipboard is empty.
+HANDLER	clipboard
+
+## take a screenshot
+POPUP	Voice Assistant	Screenshot saved.
+SPEAK	Screenshot saved.
+HANDLER	screenshot
+
+## check my battery
+LLM	qwen2.5:3b
+
+## disk space
+POPUP	Disk	/ : <disk>
+SPEAK	<disk> gigabytes free.
+HANDLER	sysinfo
+
+## wifi off
+POPUP	Voice Assistant	Wi-Fi off.
+SPEAK	Wi-Fi off.
+HANDLER	connectivity
+
+## connect my earbuds
+POPUP	Voice Assistant	I don't see earbuds nearby.
+SPEAK	I don't see earbuds nearby.
+HANDLER	bluetooth_connect
+HANDLER	connectivity
+
+## bluetooth devices
+POPUP	Bluetooth	No Bluetooth devices found.
+SPEAK	No Bluetooth devices around.
+HANDLER	connectivity
+
+## night light on
+POPUP	Voice Assistant	Night light on.
+SPEAK	Night light on.
+HANDLER	display
+
+## brightness 40
+LLM	qwen2.5:3b
+
+## set up unity
+LAUNCH	unityhub
+URL	https://docs.unity3d.com/Manual/webgl.html
+POPUP	Voice Assistant	Unity workspace ready.
+SPEAK	Unity workspace ready.
+HANDLER	unity
+
+## how many assignments do i have
+POPUP	Voice Assistant	Canvas cache is empty, Sir — run canvas-siri sync first.
+SPEAK	Canvas cache is empty, Sir — run canvas-siri sync first.
+HANDLER	canvas
+
+## what's next on my calendar
+POPUP	Voice Assistant	Your calendar isn't connected yet — add your Apple Calendar link in calendar settings, Sir.
+SPEAK	Your calendar isn't connected yet — add your Apple Calendar link in calendar settings, Sir.
+HANDLER	calendar
+
+## stop talking
+POPUP	Voice Assistant	Silent for 10 minutes.
+HANDLER	moods
+
+## speak again
+POPUP	Voice Assistant	Back.
+SPEAK	Back.
+HANDLER	moods
+
+## who are you
+POPUP	Voice Assistant	I'm your Siri of Omarchy, running right here on your machine!
+SPEAK	I'm your Siri of Omarchy, running right here on your machine!
+HANDLER	conversational
+
+## thanks
+POPUP	Voice Assistant	Anytime!
+SPEAK	Anytime!
+HANDLER	conversational
+
+## restart jellyfin
+POPUP	Voice Assistant	I don't see that container. Say check containers to list them.
+SPEAK	I don't see that container. Say check containers to list them.
+HANDLER	docker
+
+## system stats
+POPUP	System stats	Stats unavailable.
+SPEAK	Stats are on screen.
+HANDLER	system
+
+## what's the weather in tokyo
+POPUP	Weather	Sir, Sorry, I couldn't find the weather for tokyo.
+SPEAK	Sir, Sorry, I couldn't find the weather for tokyo.
+HANDLER	weather
+
+## time in tokyo
+POPUP	World clock	Tokyo: <date>, <time>
+SPEAK	It's <time> in Tokyo.
+HANDLER	worldclock

@@ -51,7 +51,7 @@ Hyprland-native desktop control through hypruse (no root, no ydotool, no portals
 | *"type hello and press enter"* | types, then Enter |
 | *"open firefox on workspace 3"* | launches placed on that workspace |
 
-Safety: locked sessions, password fields and system auth dialogs always refuse (`allow_auth` is never passed). Panic key: `SUPER+SHIFT+Backspace` → `pkill -f hypruse`. Read-only rehearsal: `HYPRUSE_DRYRUN=1`; audit log: `HYPRUSE_JOURNAL=1`.
+Safety: locked sessions, password fields and system auth dialogs always refuse (`allow_auth` is never passed). Panic key: `SUPER+ALT+Backspace` → `pkill -f hypruse` (`SUPER+SHIFT+Backspace` is already Omarchy's "toggle window gaps"). Read-only rehearsal: `HYPRUSE_DRYRUN=1`; audit log: `HYPRUSE_JOURNAL=1`.
 
 Add the keybinding to `~/.config/hypr/bindings.lua`, then `hyprctl reload`:
 
@@ -72,6 +72,17 @@ Copy `config/calendar.conf.example` to `~/.config/voice-assistant/calendar.conf`
 `.gitignore` blocks recordings, models, `calendar.conf`, caches, tokens, and state. The router refuses shell/file-destructive output; shutdown/reboot/logout ask for a spoken `yes` first.
 
 Translation is local: "how do you say good morning in Spanish" runs through your own model (`translate.conf`), never Google Translate. Only weather (wttr.in/AccuWeather), your iCloud calendar feed, Canvas and Shazam's fingerprint touch the network — and you can see all of that in `local-voice-exec --doctor`.
+
+## 🧪 Tests
+
+`local-voice-exec --selftest` replays 68 phrases through the real router and compares the result to `tests/golden.txt`. It runs in a throwaway `HOME`, in rehearsal mode: no process is launched, no URL fetched, no audio synthesized, hypruse is never imported. Every case prints what would be said, popped up, launched or opened, plus a `HANDLER` line naming the skill that claimed it (or `LLM` when it fell through to the model).
+
+```sh
+local-voice-exec --selftest            # PASS/FAIL against the golden file
+local-voice-exec --selftest --update   # accept the current output as the golden
+```
+
+Clock, date, free disk and note timestamps are masked; everything else must match byte-for-byte, which is how refactors are proven to change nothing.
 
 ## 📄 License
 
