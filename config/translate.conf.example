@@ -1,0 +1,18 @@
+# Translation — copy to ~/.config/voice-assistant/translate.conf (chmod 600)
+#
+# Nothing here contacts Google. Engines are tried in the order below.
+#
+# TRANSLATE_ENGINE: auto | ollama | libre | argos
+#   ollama  your local qwen2.5 via 127.0.0.1:11434 — no extra packages, and
+#           already running for the router. Default.
+#   libre   a local LibreTranslate server (docker run -p 5000:5000
+#           libretranslate/libretranslate). Set LIBRETRANSLATE_URL below.
+#   argos   argostranslate, only if you installed it yourself
+#           (pip install --user argostranslate) plus the language pair.
+TRANSLATE_ENGINE=auto
+
+# LIBRETRANSLATE_URL: used by the libre engine, e.g. http://127.0.0.1:5000
+LIBRETRANSLATE_URL=
+
+# Optional: a different Ollama model just for translation.
+# TRANSLATE_MODEL=qwen2.5:3b

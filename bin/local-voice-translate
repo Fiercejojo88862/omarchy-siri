@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""local-voice-translate — offline translation for Siri of Omarchy.
+
+Replaces the old "open Google Translate in the browser" branch. Nothing here
+sends your text to Google. Engines, tried in order (TRANSLATE_ENGINE=auto):
+
+  ollama  local qwen2.5 via 127.0.0.1:11434   (default, zero extra deps)
+  libre   a local LibreTranslate server        (LIBRETRANSLATE_URL)
+  argos   argostranslate, if you installed it  (pair must be installed)
+
+Usage:  local-voice-translate <text> <target-code> [--engine=NAME]
+Output: the translation on stdout, exit 0. Non-zero + message on failure.
+Config: ~/.config/voice-assistant/translate.conf
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+CONF = Path.home() / ".config/voice-assistant/translate.conf"
+OLLAMA = "http://127.0.0.1:11434/api/chat"
+MODEL = os.environ.get("TRANSLATE_MODEL", "qwen2.5:3b")
+
+# Spoken language name -> ISO code. Argos/Libre/Ollama all accept these.
+LANG_CODES = {
+    "spanish": "es", "espanol": "es", "español": "es",
+    "french": "fr", "francais": "fr", "français": "fr",
+    "german": "de", "deutsch": "de",
+    "italian": "it", "italiano": "it",
+    "portuguese": "pt", "portugues": "pt", "português": "pt",
+    "dutch": "nl", "nederlands": "nl",
+    "japanese": "ja", "nihongo": "ja",
+    "chinese": "zh", "mandarin": "zh",
+    "korean": "ko",
+    "russian": "ru",
+    "arabic": "ar",
+    "hindi": "hi",
+    "turkish": "tr",
+    "polish": "pl",
+    "swedish": "sv",
+    "greek": "el",
+    "hebrew": "he",
+    "ukrainian": "uk",
+}
+
+LANG_NAMES = {
+    "es": "Spanish", "fr": "French", "de": "German", "it": "Italian",
+    "pt": "Portuguese", "nl": "Dutch", "ja": "Japanese", "zh": "Chinese",
+    "ko": "Korean", "ru": "Russian", "ar": "Arabic", "hi": "Hindi",
+    "tr": "Turkish", "pl": "Polish", "sv": "Swedish", "el": "Greek",
+    "he": "Hebrew", "uk": "Ukrainian",
+}
+
+
+def config() -> dict:
+    out = {"engine": "auto", "libre": ""}
+    try:
+        for line in CONF.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip().upper(), v.strip().strip("'\"")
+            if k == "TRANSLATE_ENGINE" and v:
+                out["engine"] = v.lower()
+            elif k == "LIBRETRANSLATE_URL" and v:
+                out["libre"] = v.rstrip("/")
+    except OSError:
+        pass
+    return out
+
+
+def clean(text: str) -> str:
+    """Strip the wrappers a chat model likes to add around a translation."""
+    text = text.strip()
+    text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text).strip()
+    text = re.sub(r"^(translation|translated text)\s*:\s*", "", text, flags=re.I)
+    if len(text) > 1 and text[0] in "\"'“”«»" and text[-1] in "\"'“”«»":
+        text = text[1:-1].strip()
+    return text.strip()
+
+
+def via_ollama(text: str, code: str) -> str:
+    lang = LANG_NAMES.get(code, code)
+    payload = {
+        "model": MODEL,
+        "keep_alive": "30m",
+        "stream": False,
+        "messages": [
+            {"role": "system", "content":
+                "You are a translation engine. Translate the user's text into the "
+                "requested language and output ONLY the translation. Prefer the "
+                "natural, idiomatic phrasing a native speaker would use over a "
+                "word-for-word rendering (greetings especially). Keep the user's "
+                "tone. No quotes, no romanisation, no notes, no explanation."},
+            {"role": "user", "content": f"Translate to {lang}:\n{text}"},
+        ],
+        "options": {"temperature": 0.1, "num_predict": 300},
+    }
+    req = urllib.request.Request(OLLAMA, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode())
+    return clean(data["message"]["content"])
+
+
+def via_libre(text: str, code: str, url: str) -> str:
+    if not url:
+        raise RuntimeError("no LIBRETRANSLATE_URL")
+    body = json.dumps({"q": text, "source": "auto", "target": code,
+                       "format": "text"}).encode()
+    req = urllib.request.Request(f"{url}/translate", data=body,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode())
+    return clean(str(data.get("translatedText") or ""))
+
+
+def via_argos(text: str, code: str) -> str:
+    from argostranslate import translate  # noqa: PLC0415 — optional dependency
+    langs = translate.get_installed_languages()
+    src = next((l for l in langs if l.code.startswith("en")), None)
+    dst = next((l for l in langs if l.code.startswith(code)), None)
+    if not src or not dst:
+        raise RuntimeError("language pack not installed")
+    pair = src.get_translation(dst)
+    if pair is None:
+        raise RuntimeError("language pair not installed")
+    return clean(pair.translate(text))
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if not a.startswith("--engine=")]
+    forced = next((a.split("=", 1)[1] for a in sys.argv[1:]
+                   if a.startswith("--engine=")), "")
+    if len(args) < 2:
+        print("usage: local-voice-translate <text> <target-code> [--engine=NAME]",
+              file=sys.stderr)
+        return 64
+    text, raw_code = " ".join(args[:-1]).strip(), args[-1].strip().lower()
+    code = LANG_CODES.get(raw_code, raw_code)
+    if len(code) != 2:
+        print(f"unknown language: {raw_code}", file=sys.stderr)
+        return 64
+    if not text:
+        return 64
+
+    cfg = config()
+    engine = forced or cfg["engine"]
+    engines = ["ollama", "libre", "argos"] if engine == "auto" else [engine]
+    errors = []
+    for name in engines:
+        try:
+            if name == "ollama":
+                out = via_ollama(text, code)
+            elif name == "libre":
+                out = via_libre(text, code, cfg["libre"])
+            elif name == "argos":
+                out = via_argos(text, code)
+            else:
+                errors.append(f"{name}: unknown engine")
+                continue
+        except Exception as exc:  # noqa: BLE001 — each engine fails independently
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            continue
+        if out:
+            print(out)
+            return 0
+        errors.append(f"{name}: empty result")
+    print("; ".join(errors) or "no translation engine available", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

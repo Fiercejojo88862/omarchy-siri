@@ -20,7 +20,7 @@ done
 # --- 1. Scripts -----------------------------------------------------------------
 mkdir -p "$BIN"
 for f in local-voice local-voice-exec local-voice-tts local-voice-say \
-         local-voice-calendar apple-calendar apple-calendar-set-icon; do
+         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon; do
     ln -sf "$REPO/bin/$f" "$BIN/$f"
     chmod +x "$REPO/bin/$f"
 done
@@ -59,7 +59,7 @@ info "Piper voices present."
 
 # --- 5. Config templates (never overwrite yours) --------------------------------------
 mkdir -p "$CONF"
-for f in calendar persona weather; do
+for f in calendar persona weather translate; do
     [[ -f "$CONF/$f.conf" ]] || cp "$REPO/config/$f.conf.example" "$CONF/$f.conf"
 done
 chmod 600 "$CONF"/*.conf 2>/dev/null || true

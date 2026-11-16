@@ -42,7 +42,7 @@ def init_config() -> int:
     persona or API key.
     """
     wrote, kept = [], []
-    for name in ("persona.conf", "calendar.conf", "weather.conf"):
+    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf"):
         dst = CONFIG_DIR / name
         if dst.exists():
             kept.append(name)
@@ -1888,6 +1888,55 @@ def _open_url(url: str) -> bool:
     return False
 
 
+def _handle_translate(norm: str) -> bool:
+    """Local translation. Never opens Google Translate or any remote page."""
+    phrase = lang = ""
+    m = re.search(r"how do you say\s+[\"']?(.+?)[\"']?\s+in\s+([a-z]+)", norm)
+    if m:
+        phrase, lang = m.group(1), m.group(2)
+    else:
+        m = re.search(r"translate\s+[\"']?(.+?)[\"']?\s+(?:to|into)\s+([a-z]+)", norm)
+        if m:
+            phrase, lang = m.group(1), m.group(2)
+        else:
+            m = re.search(r"\btranslate\b.*?\b(?:to|into)\s+([a-z]+)\s*:?\s*(.+)", norm)
+            if m:
+                lang, phrase = m.group(1), m.group(2)
+    phrase = (phrase or "").strip(" ,.!?\"'")
+    lang = (lang or "").strip()
+    if not phrase or not lang:
+        return False
+    if phrase in ("that", "this", "it") or len(lang) < 3:
+        return False
+    helper = Path.home() / ".local/bin/local-voice-translate"
+    if not (helper.is_file() and os.access(helper, os.X_OK)):
+        _confirm("Local translation isn't installed — run install.sh.")
+        return True
+    try:
+        proc = subprocess.run([str(helper), phrase, lang], capture_output=True,
+                              text=True, timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        _confirm(f"Translation failed: {exc}"[:160])
+        return True
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not out:
+        why = (proc.stderr or "").strip().splitlines()
+        detail = why[-1][:120] if why else "no engine answered"
+        _touch_interaction()
+        _popup("Translation", detail, timeout_ms=8000)
+        _speak(_with_address("Sorry, no local translator answered that.",
+                             is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    pretty = lang.title()
+    _touch_interaction()
+    _popup("Translation", f"{phrase} → {pretty}:\n{out}"[:800], timeout_ms=9000)
+    _speak(_with_address(f"{phrase} in {pretty}: {out}"[:280],
+                         is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
 def _handle_web(norm: str) -> bool:
     from urllib.parse import quote_plus
     # Direct YouTube (incl. graceful playlist limit).
@@ -1900,18 +1949,7 @@ def _handle_web(norm: str) -> bool:
         if _open_url("https://www.youtube.com"):
             _confirm("YouTube is open — I can't reach your playlists offline, Sir.")
             return True
-    # Translate via Google Translate page (browser does the work).
-    m = re.search(r"how do you say [\"']?(.+?)[\"']? in (\w+)\b|translate [\"']?(.+?)[\"']? to (\w+)\b", norm)
-    if m:
-        phrase = (m.group(1) or m.group(3) or "").strip()
-        lang = (m.group(2) or m.group(4) or "").lower()
-        codes = {"spanish": "es", "french": "fr", "german": "de", "italian": "it",
-                 "portuguese": "pt", "japanese": "ja", "chinese": "zh-CN", "korean": "ko",
-                 "russian": "ru", "arabic": "ar", "hindi": "hi", "dutch": "nl"}
-        if phrase and lang in codes:
-            if _open_url(f"https://translate.google.com/?sl=auto&tl={codes[lang]}&text={quote_plus(phrase)}"):
-                _confirm(f"I opened the translation to {lang}.")
-                return True
+    # Translation lives in _handle_translate (local engines only, no Google).
     # General web search: results on screen (can't read the web offline).
     m = re.search(r"\bsearch (the web )?for (.+)|google (.+)|look up (.+)|who won (.+)|define (\w+)\b", norm)
     if m:
@@ -2764,7 +2802,7 @@ def try_task_intent(raw: str) -> bool:
         if handler(norm):
             return True
     # Answers + web before weather ("search the web for weather" = search).
-    for handler in (_handle_calc, _handle_spell, _handle_web):
+    for handler in (_handle_calc, _handle_spell, _handle_translate, _handle_web):
         if handler(norm):
             return True
     # Window/app control by name, clipboard, screenshot, computer use, dictation.
@@ -2867,7 +2905,8 @@ Task rules (everyday help — prefer these over none):
 - Clipboard copy ("copy this code: ...", "copy to clipboard: ...") -> {"type": "task", "target": "code", "notify": "Copied"}
 - Morning brief ("brief me", "morning brief") -> {"type": "task", "target": "brief", "notify": "Pulling the brief"}
 - Math/units ("what is 12 plus 30", "convert 150 F to C") -> {"type": "task", "target": "calc", "notify": "Working it out"}
-- Web/search/translate ("search the web for X", "open YouTube") -> {"type": "task", "target": "web", "notify": "Opening that"}
+- Web/search ("search the web for X", "open YouTube") -> {"type": "task", "target": "web", "notify": "Opening that"}
+- Translate ("how do you say hello in Spanish", "translate good morning to French") -> {"type": "task", "target": "translate", "notify": "Translating"}
 - Spelling ("spell idiosyncratic") -> {"type": "task", "target": "spell", "notify": "Spelling it"}
 - Windows by name ("close my browser", "focus my editor") -> {"type": "task", "target": "window", "notify": "On it"}
 - Clipboard/screenshot/dictation ("read my clipboard", "take a screenshot", "type hello") -> {"type": "task", "target": "desk", "notify": "Done"}
@@ -3084,6 +3123,9 @@ try:
                 notify = ""
             elif t.startswith("brief"):
                 _handle_brief(_normalise(prompt))
+                notify = ""
+            elif t.startswith("translate"):
+                _handle_translate(_normalise(prompt))
                 notify = ""
             elif t.startswith("shazam"):
                 _handle_shazam(_normalise(prompt))

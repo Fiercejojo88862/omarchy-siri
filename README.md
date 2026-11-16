@@ -22,6 +22,7 @@ INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
 * Chitchat: rotating jokes ("tell me a joke"), fun facts, and friendly answers (compliments, favorites, "will you marry me") — all offline, all in her voice
 * `bin/local-voice-tts` / `local-voice-say` — Siri voice: Piper `en_GB-southern_english_female-low` (offline, sub-second, mastered to 48k/24-bit)
 * `bin/local-voice-calendar` — merged iCloud home+work feeds (today/tomorrow/next)
+* `bin/local-voice-translate` — offline translation (local Ollama by default; LibreTranslate or argos opt-in)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
 * `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
 * `config/*.example` — calendar + persona templates
@@ -69,6 +70,8 @@ Copy `config/calendar.conf.example` to `~/.config/voice-assistant/calendar.conf`
 ## 🔒 Privacy
 
 `.gitignore` blocks recordings, models, `calendar.conf`, caches, tokens, and state. The router refuses shell/file-destructive output; shutdown/reboot/logout ask for a spoken `yes` first.
+
+Translation is local: "how do you say good morning in Spanish" runs through your own model (`translate.conf`), never Google Translate. Only weather (wttr.in/AccuWeather), your iCloud calendar feed, Canvas and Shazam's fingerprint touch the network — and you can see all of that in `local-voice-exec --doctor`.
 
 ## 📄 License
 
