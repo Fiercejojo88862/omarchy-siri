@@ -13,8 +13,13 @@ VOICE_MODEL="$HOME/.local/share/piper/en_GB-southern_english_female-low.onnx"
 RATE=0.85    # piper length-scale: lower = faster (1.0 is model default)
 ENERGY=0.8   # piper noise-scale: higher = more expressive (default 0.667)
 LIFT=1.07    # rubberband pitch lift: higher = brighter, tempo untouched
-RAW_WAV="/tmp/voice_tts_raw.wav"
-HIRES="/tmp/voice_tts_hires.wav"
+# Scratch audio in the private runtime dir (0600, gone at logout), not /tmp.
+umask 077
+RUN="${XDG_RUNTIME_DIR:-/tmp}/voice-assistant"
+mkdir -p "$RUN"
+chmod 700 "$RUN"
+RAW_WAV="$RUN/tts_raw.wav"
+HIRES="$RUN/tts_hires.wav"
 
 command -v piper >/dev/null 2>&1 || { notify-send -t 2500 "Voice" "piper not installed" 2>/dev/null || true; exit 1; }
 [[ -f "$VOICE_MODEL" ]] || { notify-send -t 2500 "Voice" "southern voice missing (re-run install.sh)" 2>/dev/null || true; exit 1; }

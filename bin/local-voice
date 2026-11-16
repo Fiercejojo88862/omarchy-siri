@@ -6,11 +6,20 @@
 # Design: start is instant, stop forks transcribe+LLM+dispatch so Hyprland never blocks.
 set -euo pipefail
 
-PIDFILE="/tmp/voice_record.pid"
-AUDIOFILE="/tmp/voice_command.wav"
+# Runtime files live in the per-user tmpfs ($XDG_RUNTIME_DIR), not /tmp: the
+# recording is private audio and must never be world-readable, and the whole
+# directory is cleared at logout so nothing is left behind. umask 077 makes
+# pw-record's WAV 0600 on creation; the chmod is belt-and-braces for the dir.
+umask 077
+RUN="${XDG_RUNTIME_DIR:-/tmp}/voice-assistant"
+mkdir -p "$RUN"
+chmod 700 "$RUN"
+
+PIDFILE="$RUN/record.pid"
+AUDIOFILE="$RUN/command.wav"
 MODEL="$HOME/.local/share/whisper-models/ggml-base.en.bin"
-LOCK="/tmp/voice_record.lock"
-LOG="/tmp/voice_record.log"
+LOCK="$RUN/record.lock"
+LOG="$RUN/voice.log"
 # NOTE: every backgrounded process below redirects stdin from /dev/null and
 # stdout/stderr to $LOG. Hyprland's exec_cmd waits for the dispatched child's
 # pipes; a background child inheriting them keeps the dispatch "running" and

@@ -20,6 +20,16 @@ prompt = sys.argv[1].strip()
 if not prompt:
     sys.exit(0)
 
+# Runtime scratch in the private per-user tmpfs (dir 0700, files 0600 from the
+# callers' umask), cleared at logout. Recordings, Shazam samples and debug logs
+# must never sit in a shared /tmp.
+RUN_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "voice-assistant"
+try:
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    RUN_DIR.chmod(0o700)
+except OSError:
+    pass
+
 # --- deterministic app resolution (fast-path, no LLM) -----------------------
 # Whisper often returns a bare noun ("dolphin") or a phrase the LLM was never
 # taught ("open files"). Resolve those locally so common apps open instantly
@@ -625,7 +635,7 @@ def _handle_shazam(norm: str) -> bool:
         _confirm("Sorry, I can't listen without pw-record.")
         return True
     _popup("Shazam", "Listening for music…", timeout_ms=11000)
-    sample = "/tmp/voice_shazam.wav"
+    sample = str(RUN_DIR / "shazam.wav")
     try:
         subprocess.run(
             ["pw-record", "--rate=16000", "--channels=1", sample],
@@ -2379,7 +2389,7 @@ def _handle_canvas(norm: str, raw: str) -> bool:
     if not (os.path.isfile(helper) and os.access(helper, os.X_OK)):
         helper = shutil.which("canvas-siri") or helper
     try:
-        with open("/tmp/voice_canvas.log", "a") as lf:
+        with open(RUN_DIR / "canvas.log", "a") as lf:
             lf.write(f"{time.strftime('%H:%M:%S')} raw={raw!r} norm={norm!r} helper={helper}\n")
     except Exception:
         pass
