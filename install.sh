@@ -20,7 +20,7 @@ done
 # --- 1. Scripts -----------------------------------------------------------------
 mkdir -p "$BIN"
 for f in local-voice local-voice-exec local-voice-tts local-voice-say \
-         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon; do
+         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon ruby-engine; do
     ln -sf "$REPO/bin/$f" "$BIN/$f"
     chmod +x "$REPO/bin/$f"
 done
@@ -59,15 +59,15 @@ info "Piper voices present."
 
 # --- 5. Config templates (never overwrite yours) --------------------------------------
 mkdir -p "$CONF"
-for f in calendar persona weather translate cloud; do
+for f in calendar persona weather translate cloud voice; do
     [[ -f "$CONF/$f.conf" ]] || cp "$REPO/config/$f.conf.example" "$CONF/$f.conf"
 done
 chmod 600 "$CONF"/*.conf 2>/dev/null || true
-info "Config templates in $CONF (calendar, persona, weather, translation, cloud brain)."
+info "Config templates in $CONF (calendar, persona, weather, translation, cloud, voice)."
 
-# --- 6. Apple Calendar desktop entry ---------------------------------------------------
-DESKTOP="$HOME/.local/share/applications/apple-calendar.desktop"
-cat > "$DESKTOP" <<EOF
+# --- 6. Desktop entries ---------------------------------------------------
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/apple-calendar.desktop" <<EOF
 [Desktop Entry]
 Name=Apple Calendar
 Comment=Local viewer for iCloud home and work calendars
@@ -78,14 +78,26 @@ Type=Application
 Categories=Office;Calendar;
 StartupNotify=true
 EOF
+cat > "$HOME/.local/share/applications/ruby-engine.desktop" <<EOF
+[Desktop Entry]
+Name=Ruby Engine
+Comment=Customize Ruby — voice, personality, cloud brain, and more on Omarchy
+Exec=$BIN/ruby-engine
+Icon=audio-input-microphone
+Terminal=false
+Type=Application
+Categories=Settings;
+Keywords=ruby;voice;assistant;omarchy;siri;tts;ai;personality;
+StartupNotify=true
+EOF
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-info "Desktop entry installed."
+info "Desktop entries installed (Apple Calendar, Ruby Engine)."
 
 # --- 7. Hyprland keybinding --------------------------------------------------------------
 info "Add this line to ~/.config/hypr/bindings.lua, then: hyprctl reload"
-echo '  o.bind("Insert", "Voice: talk / send", "local-voice toggle")'
+echo '  o.bind("Insert", "Ruby: talk / send", "local-voice toggle")'
 echo '  (see hypr/bindings-voice.lua)'
 echo
-info "Computer-use panic key (kills hypruse mid-action, safe): bind SUPER+SHIFT+Backspace to: pkill -f hypruse"
+info "Computer-use panic key (kills hypruse mid-action, safe): SUPER+ALT+Backspace -> pkill -f hypruse"
 echo
 info "Done. Press INS to talk. Voice is Piper southern-English female (offline, instant)."

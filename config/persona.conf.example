@@ -21,3 +21,14 @@ HONORIFIC_IDLE_SECONDS=180
 #             honorific ("Sir, I couldn't reach the forecast"). 0 = say them
 #             plainly. Default: 1
 HONORIFIC_ON_ERRORS=1
+
+# AFFECTION: tone toward you. none | friendly | warm | loving
+#             "loving" = devoted, caring, affectionate (Ruby Engine personality).
+AFFECTION=friendly
+
+# LIKES: comma-separated things she knows you like (used for warm/personal replies).
+LIKES=
+
+# DISLIKES: comma-separated things you dislike (she avoids suggesting them).
+DISLIKES=
+

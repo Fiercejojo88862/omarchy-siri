@@ -8,12 +8,33 @@ TEXT="${*:-}"
 [[ -z "$TEXT" ]] && exit 0
 TEXT="$(echo "$TEXT" | cut -c1-280)"
 
+VOICE_CONF="$HOME/.config/voice-assistant/voice.conf"
 VOICE_MODEL="$HOME/.local/share/piper/en_GB-southern_english_female-low.onnx"
 # Delivery: clear and measured. Tune these three to taste.
-# VOICE_RATE/VOICE_ENERGY/VOICE_LIFT env vars override defaults.
-RATE="${VOICE_RATE:-1.0}"    # piper length-scale: lower = faster (1.0 is model default)
-ENERGY="${VOICE_ENERGY:-0.8}" # piper noise-scale: higher = more expressive (default 0.667)
-LIFT="${VOICE_LIFT:-1.05}"   # rubberband pitch lift: higher = brighter, tempo untouched
+# voice.conf provides defaults; VOICE_* env vars override.
+RATE="1.0"    # piper length-scale: lower = faster (1.0 is model default)
+ENERGY="0.8"  # piper noise-scale: higher = more expressive (default 0.667)
+LIFT="1.05"   # rubberband pitch lift: higher = brighter, tempo untouched
+SPEAK_DELAY="0.15"
+if [[ -f "$VOICE_CONF" ]]; then
+    while IFS='=' read -r k v; do
+        k="${k%%#*}"; k="${k//[[:space:]]/}"
+        [[ -z "$k" || "$k" == \#* ]] && continue
+        v="${v%%#*}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+        case "$k" in
+            VOICE_MODEL|MODEL) VOICE_MODEL="${v/#\~/$HOME}" ;;
+            RATE|VOICE_RATE) RATE="$v" ;;
+            ENERGY|VOICE_ENERGY|NOISE) ENERGY="$v" ;;
+            LIFT|VOICE_LIFT|PITCH) LIFT="$v" ;;
+            SPEAK_DELAY|VOICE_SPEAK_DELAY) SPEAK_DELAY="$v" ;;
+        esac
+    done < "$VOICE_CONF"
+fi
+RATE="${VOICE_RATE:-$RATE}"
+ENERGY="${VOICE_ENERGY:-$ENERGY}"
+LIFT="${VOICE_LIFT:-$LIFT}"
+SPEAK_DELAY="${VOICE_SPEAK_DELAY:-$SPEAK_DELAY}"
+
 # Scratch audio in the private runtime dir (0600, gone at logout), not /tmp.
 umask 077
 RUN="${XDG_RUNTIME_DIR:-/tmp}/voice-assistant"
@@ -46,8 +67,8 @@ if [[ -f "$PLAY_PIDFILE" ]]; then
 fi
 
 # Small pre-playback delay so speech doesn't start on top of notification
-# sounds or feel clipped at the beginning. Tune with VOICE_SPEAK_DELAY (seconds).
-speak_delay="${VOICE_SPEAK_DELAY:-0.15}"
+# sounds or feel clipped at the beginning. Configurable via voice.conf/env.
+speak_delay="$SPEAK_DELAY"
 
 # Detached playback: a player inheriting a dispatch pipe keeps the caller
 # waiting and risks SIGTTIN — detached fds play and vanish.

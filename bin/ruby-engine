@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""Ruby Engine — native settings and control app for Ruby on Omarchy.
+
+A premium GTK4/libadwaita app to customize Ruby's voice, persona, personality
+(including affection), cloud brain, and timing. Reads/writes the same config
+files as the voice assistant (~/.config/voice-assistant/*.conf).
+"""
+
+import glob
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+
+APP_ID = "com.omarchy.ruby-engine"
+CONF_DIR = Path.home() / ".config/voice-assistant"
+STATE_DIR = Path.home() / ".local/state/voice-assistant"
+BIN_DIR = Path.home() / ".local/bin"
+PIPER_DIR = Path.home() / ".local/share/piper"
+
+
+def ensure_conf_dir():
+    CONF_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def read_kv(path: Path) -> dict:
+    data = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            data[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return data
+
+
+def read_conf(name: str) -> dict:
+    return read_kv(CONF_DIR / name)
+
+
+def write_conf(name: str, updates: dict, template: Path | None = None):
+    """Update keys in a conf file, preserving comments/other lines when possible."""
+    ensure_conf_dir()
+    path = CONF_DIR / name
+    lines = []
+    if path.exists():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        except OSError:
+            lines = []
+    elif template and template.exists():
+        try:
+            lines = template.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        except OSError:
+            lines = []
+
+    seen = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k in updates:
+                new_lines.append(f"{k}={updates[k]}\n")
+                seen.add(k)
+                continue
+        new_lines.append(line if line.endswith("\n") else line + "\n")
+
+    for k, v in updates.items():
+        if k not in seen:
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
+            new_lines.append(f"{k}={v}\n")
+
+    try:
+        path.write_text("".join(new_lines), encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def list_piper_voices():
+    voices = []
+    if PIPER_DIR.is_dir():
+        for onnx in sorted(PIPER_DIR.glob("*.onnx")):
+            voices.append(str(onnx))
+    # also common alt locations
+    for pat in ["/usr/share/piper/voices/*.onnx", "/usr/local/share/piper/*.onnx"]:
+        for onnx in sorted(glob.glob(pat)):
+            if onnx not in voices:
+                voices.append(onnx)
+    return voices
+
+
+def voice_display_name(path: str) -> str:
+    name = Path(path).stem
+    name = name.replace("_", " ").replace("-", " ")
+    return name
+
+
+def run_cmd(argv, **kw):
+    try:
+        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **kw)
+    except Exception:
+        return None
+
+
+def which(cmd):
+    return shutil.which(cmd) if 'shutil' in globals() else __import__('shutil').which(cmd)
+
+
+import shutil  # noqa: E402
+
+
+class RubyEngineWindow(Adw.ApplicationWindow):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.set_title("Ruby Engine")
+        self.set_default_size(920, 720)
+
+        self.toast_overlay = Adw.ToastOverlay()
+        self.set_content(self.toast_overlay)
+
+        toolbar_view = Adw.ToolbarView()
+        self.toast_overlay.set_child(toolbar_view)
+
+        header = Adw.HeaderBar()
+        title = Adw.WindowTitle(title="Ruby Engine", subtitle="Ruby on Omarchy")
+        header.set_title_widget(title)
+
+        test_btn = Gtk.Button(icon_name="audio-volume-high-symbolic", tooltip_text="Test voice")
+        test_btn.add_css_class("flat")
+        test_btn.connect("clicked", self.on_test_voice)
+        header.pack_end(test_btn)
+
+        toolbar_view.add_top_bar(header)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        toolbar_view.set_content(self.stack)
+
+        view_switcher = Adw.ViewSwitcher()
+        view_switcher.set_stack(self.stack)
+        view_switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(view_switcher)
+
+        self.build_overview_page()
+        self.build_voice_page()
+        self.build_persona_page()
+        self.build_cloud_page()
+
+        self.load_all()
+
+    def toast(self, msg):
+        t = Adw.Toast(title=msg, timeout=3)
+        self.toast_overlay.add_toast(t)
+
+    def page_scroller(self, child):
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        clamp = Adw.Clamp(maximum_size=760, tightening_threshold=600)
+        clamp.set_margin_top(24)
+        clamp.set_margin_bottom(24)
+        clamp.set_margin_start(16)
+        clamp.set_margin_end(16)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        box.append(child)
+        clamp.set_child(box)
+        sc.set_child(clamp)
+        return sc
+
+    # ---------- Overview ----------
+    def build_overview_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+
+        hero = Adw.StatusPage()
+        hero.set_title("Ruby")
+        hero.set_description("Your voice intelligence on Omarchy — local-first, fast, and yours.")
+        hero.set_icon_name("audio-input-microphone-symbolic")
+        page.append(hero)
+
+        group = Adw.PreferencesGroup(title="Quick actions")
+        row = Adw.ActionRow(title="Say hello", subtitle="Make Ruby speak a test phrase")
+        btn = Gtk.Button(label="Speak", valign=Gtk.Align.CENTER)
+        btn.add_css_class("suggested-action")
+        btn.connect("clicked", self.on_test_voice)
+        row.add_suffix(btn)
+        row.set_activatable_widget(btn)
+        group.add(row)
+
+        row2 = Adw.ActionRow(title="Push-to-talk", subtitle="Press Insert to talk, press again to send")
+        badge = Gtk.Label(label="Insert")
+        badge.add_css_class("dim-label")
+        badge.set_valign(Gtk.Align.CENTER)
+        row2.add_suffix(badge)
+        group.add(row2)
+
+        row3 = Adw.ActionRow(title="Cloud brain", subtitle="Use a fast cloud model for open-ended answers (falls back to local)")
+        self.overview_cloud_status = Gtk.Label(label="Off")
+        self.overview_cloud_status.add_css_class("dim-label")
+        self.overview_cloud_status.set_valign(Gtk.Align.CENTER)
+        row3.add_suffix(self.overview_cloud_status)
+        group.add(row3)
+        page.append(group)
+
+        group2 = Adw.PreferencesGroup(title="About Ruby Engine")
+        row4 = Adw.ActionRow(title="Native settings app", subtitle="Customize voice, personality, cloud brain, and timing for Ruby on Omarchy")
+        group2.add(row4)
+        page.append(group2)
+
+        self.stack.add_titled_with_icon(self.page_scroller(page), "overview", "Overview", "user-home-symbolic")
+
+    # ---------- Voice ----------
+    def build_voice_page(self):
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+
+        group = Adw.PreferencesGroup(title="Voice", description="Piper TTS — offline, fast. Changes apply on next spoken response.")
+        self.voice_model_row = Adw.ComboRow(title="Voice model", subtitle="Piper .onnx voice")
+        self.voice_model_store = Gtk.StringList()
+        self.voice_model_row.set_model(self.voice_model_store)
+        group.add(self.voice_model_row)
+
+        self.rate_row = Adw.SpinRow.new_with_range(0.5, 1.6, 0.05)
+        self.rate_row.set_title("Speed (length scale)")
+        self.rate_row.set_subtitle("Higher = slower, clearer (1.0 is model default)")
+        self.rate_row.set_value(1.0)
+        group.add(self.rate_row)
+
+        self.energy_row = Adw.SpinRow.new_with_range(0.2, 1.5, 0.05)
+        self.energy_row.set_title("Expressiveness (noise)")
+        self.energy_row.set_subtitle("Higher = more lively delivery")
+        self.energy_row.set_value(0.8)
+        group.add(self.energy_row)
+
+        self.lift_row = Adw.SpinRow.new_with_range(0.8, 1.3, 0.01)
+        self.lift_row.set_title("Pitch lift")
+        self.lift_row.set_subtitle("Higher = brighter tone")
+        self.lift_row.set_digits(2)
+        self.lift_row.set_value(1.05)
+        group.add(self.lift_row)
+
+        test_row = Adw.ActionRow(title="Test voice", subtitle="Speak a sample with current settings")
+        test_btn = Gtk.Button(label="Play sample", valign=Gtk.Align.CENTER)
+        test_btn.connect("clicked", self.on_test_voice)
+        test_row.add_suffix(test_btn)
+        test_row.set_activatable_widget(test_btn)
+        group.add(test_row)
+        content.append(group)
+
+        group2 = Adw.PreferencesGroup(title="Timing", description="Tune responsiveness and cut-off behavior.")
+        self.stop_grace_row = Adw.SpinRow.new_with_range(0.0, 1.5, 0.05)
+        self.stop_grace_row.set_title("Stop grace (seconds)")
+        self.stop_grace_row.set_subtitle("Keep recording after Insert to capture sentence endings")
+        self.stop_grace_row.set_value(0.3)
+        group2.add(self.stop_grace_row)
+
+        self.speak_delay_row = Adw.SpinRow.new_with_range(0.0, 1.0, 0.05)
+        self.speak_delay_row.set_title("Speak delay (seconds)")
+        self.speak_delay_row.set_subtitle("Pause before playback to avoid overlap/clipping")
+        self.speak_delay_row.set_value(0.15)
+        group2.add(self.speak_delay_row)
+        content.append(group2)
+
+        save = Gtk.Button(label="Save voice settings", halign=Gtk.Align.END)
+        save.add_css_class("suggested-action")
+        save.add_css_class("pill")
+        save.connect("clicked", self.on_save_voice)
+        content.append(save)
+
+        self.stack.add_titled_with_icon(self.page_scroller(content), "voice", "Voice", "audio-speakers-symbolic")
+
+    # ---------- Persona ----------
+    def build_persona_page(self):
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+
+        group = Adw.PreferencesGroup(title="Identity", description="What she's called and how she addresses you.")
+        self.name_entry = Adw.EntryRow(title="Assistant name")
+        self.name_entry.set_text("Ruby")
+        group.add(self.name_entry)
+
+        self.honorifics_entry = Adw.EntryRow(title="Honorifics")
+        self.honorifics_entry.set_text("Sir")
+        self.honorifics_entry.set_tooltip_text("Comma-separated pool (e.g. Sir,Madam). Use 'none' to disable.")
+        group.add(self.honorifics_entry)
+
+        self.idle_row = Adw.SpinRow.new_with_range(30, 3600, 10)
+        self.idle_row.set_title("Conversation idle (seconds)")
+        self.idle_row.set_subtitle("Silence before she treats the next reply as a new conversation start")
+        self.idle_row.set_value(180)
+        group.add(self.idle_row)
+
+        self.errors_row = Adw.SwitchRow(title="Honorific on errors/confirmations")
+        self.errors_row.set_subtitle("Prefix corrections and confirmations with your honorific")
+        self.errors_row.set_active(True)
+        group.add(self.errors_row)
+        content.append(group)
+
+        group2 = Adw.PreferencesGroup(title="Personality", description="How Ruby relates to you. 'Loving' makes her warm, caring, devoted, and affectionate in a tasteful way.")
+        self.affection_row = Adw.ComboRow(title="Affection")
+        self.affection_row.set_subtitle("Tone toward you in conversation and AI answers")
+        self.affection_store = Gtk.StringList.new(["none", "friendly", "warm", "loving"])
+        self.affection_row.set_model(self.affection_store)
+        group2.add(self.affection_row)
+
+        self.likes_entry = Adw.EntryRow(title="Things you like")
+        self.likes_entry.set_tooltip_text("Comma-separated (e.g. coding, gym, anime, coffee)")
+        group2.add(self.likes_entry)
+
+        self.dislikes_entry = Adw.EntryRow(title="Things you dislike")
+        self.dislikes_entry.set_tooltip_text("Comma-separated; Ruby avoids suggesting these")
+        group2.add(self.dislikes_entry)
+        content.append(group2)
+
+        save = Gtk.Button(label="Save persona & personality", halign=Gtk.Align.END)
+        save.add_css_class("suggested-action")
+        save.add_css_class("pill")
+        save.connect("clicked", self.on_save_persona)
+        content.append(save)
+
+        self.stack.add_titled_with_icon(self.page_scroller(content), "persona", "Persona", "avatar-default-symbolic")
+
+    # ---------- Cloud ----------
+    def build_cloud_page(self):
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+
+        group = Adw.PreferencesGroup(title="Cloud brain", description="Optional faster AI answers via any OpenAI-compatible API. Falls back to local Ollama on error or when you hit your limit.")
+        self.cloud_enabled = Adw.SwitchRow(title="Enable cloud brain")
+        self.cloud_enabled.set_subtitle("Off = fully local answers")
+        group.add(self.cloud_enabled)
+
+        self.cloud_key = Adw.PasswordEntryRow(title="API key")
+        group.add(self.cloud_key)
+
+        self.cloud_url = Adw.EntryRow(title="Base URL")
+        self.cloud_url.set_text("https://api.groq.com/openai/v1")
+        group.add(self.cloud_url)
+
+        self.cloud_model = Adw.EntryRow(title="Model")
+        self.cloud_model.set_text("llama-3.1-8b-instant")
+        group.add(self.cloud_model)
+
+        self.cloud_cap = Adw.SpinRow.new_with_range(0, 10000, 1)
+        self.cloud_cap.set_title("Daily request cap")
+        self.cloud_cap.set_subtitle("0 = unlimited. On cap/limit she answers locally.")
+        self.cloud_cap.set_value(50)
+        group.add(self.cloud_cap)
+
+        self.cloud_cooldown = Adw.SpinRow.new_with_range(60, 86400, 60)
+        self.cloud_cooldown.set_title("Limit notice cooldown (seconds)")
+        self.cloud_cooldown.set_subtitle("How often to repeat the limit message")
+        self.cloud_cooldown.set_value(3600)
+        group.add(self.cloud_cooldown)
+        content.append(group)
+
+        group2 = Adw.PreferencesGroup(title="Usage")
+        self.usage_row = Adw.ActionRow(title="Today's requests", subtitle="—")
+        self.usage_label = Gtk.Label(label="0")
+        self.usage_label.add_css_class("dim-label")
+        self.usage_label.set_valign(Gtk.Align.CENTER)
+        self.usage_row.add_suffix(self.usage_label)
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Refresh")
+        refresh.add_css_class("flat")
+        refresh.connect("clicked", lambda *_: self.refresh_usage())
+        self.usage_row.add_suffix(refresh)
+        group2.add(self.usage_row)
+        content.append(group2)
+
+        note = Adw.PreferencesGroup()
+        row = Adw.ActionRow(title="Groq tip", subtitle="Free tier: console.groq.com → key, keep default URL/model, enable cloud brain. On limit she switches to local automatically.")
+        note.add(row)
+        content.append(note)
+
+        save = Gtk.Button(label="Save cloud settings", halign=Gtk.Align.END)
+        save.add_css_class("suggested-action")
+        save.add_css_class("pill")
+        save.connect("clicked", self.on_save_cloud)
+        content.append(save)
+
+        self.stack.add_titled_with_icon(self.page_scroller(content), "cloud", "Cloud Brain", "weather-overcast-symbolic")
+
+    # ---------- load/save ----------
+    def load_all(self):
+        # voices
+        self._voice_paths = list_piper_voices()
+        while self.voice_model_store.get_n_items() > 0:
+            self.voice_model_store.remove(0)
+        for p in self._voice_paths:
+            self.voice_model_store.append(voice_display_name(p))
+
+        v = read_conf("voice.conf")
+        model = os.path.expanduser(v.get("VOICE_MODEL", v.get("MODEL", "")) or "")
+        if not model and self._voice_paths:
+            model = self._voice_paths[0]
+        idx = 0
+        for i, p in enumerate(self._voice_paths):
+            if p == model or Path(p).name == Path(model).name:
+                idx = i
+                break
+        if self._voice_paths:
+            self.voice_model_row.set_selected(idx)
+        try:
+            self.rate_row.set_value(float(v.get("RATE", v.get("VOICE_RATE", "1.0"))))
+        except Exception:
+            self.rate_row.set_value(1.0)
+        try:
+            self.energy_row.set_value(float(v.get("ENERGY", v.get("VOICE_ENERGY", "0.8"))))
+        except Exception:
+            self.energy_row.set_value(0.8)
+        try:
+            self.lift_row.set_value(float(v.get("LIFT", v.get("VOICE_LIFT", "1.05"))))
+        except Exception:
+            self.lift_row.set_value(1.05)
+        try:
+            self.stop_grace_row.set_value(float(v.get("STOP_GRACE", v.get("VOICE_STOP_GRACE", "0.3"))))
+        except Exception:
+            self.stop_grace_row.set_value(0.3)
+        try:
+            self.speak_delay_row.set_value(float(v.get("SPEAK_DELAY", v.get("VOICE_SPEAK_DELAY", "0.15"))))
+        except Exception:
+            self.speak_delay_row.set_value(0.15)
+
+        p = read_conf("persona.conf")
+        self.name_entry.set_text(p.get("ASSISTANT_NAME", "Ruby") or "Ruby")
+        self.honorifics_entry.set_text(p.get("HONORIFICS", "Sir") or "Sir")
+        try:
+            self.idle_row.set_value(float(p.get("HONORIFIC_IDLE_SECONDS", "180")))
+        except Exception:
+            self.idle_row.set_value(180)
+        self.errors_row.set_active(p.get("HONORIFIC_ON_ERRORS", "1").lower() not in ("0", "false", "no", "off"))
+        aff = (p.get("AFFECTION", "friendly") or "friendly").lower()
+        aff = "loving" if aff == "devoted" else aff
+        aff_map = {"none": 0, "friendly": 1, "warm": 2, "loving": 3}
+        self.affection_row.set_selected(aff_map.get(aff, 1))
+        self.likes_entry.set_text(p.get("LIKES", "") or "")
+        self.dislikes_entry.set_text(p.get("DISLIKES", "") or "")
+
+        c = read_conf("cloud.conf")
+        self.cloud_enabled.set_active(c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on"))
+        self.cloud_key.set_text(c.get("CLOUD_API_KEY", "") or "")
+        self.cloud_url.set_text(c.get("CLOUD_BASE_URL", "https://api.groq.com/openai/v1") or "https://api.groq.com/openai/v1")
+        self.cloud_model.set_text(c.get("CLOUD_MODEL", "llama-3.1-8b-instant") or "llama-3.1-8b-instant")
+        try:
+            self.cloud_cap.set_value(float(c.get("CLOUD_DAILY_CAP", "50")))
+        except Exception:
+            self.cloud_cap.set_value(50)
+        try:
+            self.cloud_cooldown.set_value(float(c.get("CLOUD_LIMIT_COOLDOWN", "3600")))
+        except Exception:
+            self.cloud_cooldown.set_value(3600)
+
+        self.refresh_usage()
+
+    def refresh_usage(self):
+        usage_path = STATE_DIR / "cloud_usage.json"
+        count = 0
+        try:
+            import json, datetime
+            data = json.loads(usage_path.read_text())
+            today = datetime.datetime.now().strftime("%Y-%m-%d")
+            if data.get("date") == today:
+                count = int(data.get("count", 0))
+        except Exception:
+            count = 0
+        c = read_conf("cloud.conf")
+        cap = c.get("CLOUD_DAILY_CAP", "50") or "50"
+        on = c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on") and bool(c.get("CLOUD_API_KEY"))
+        self.usage_label.set_label(f"{count} / {cap}")
+        self.usage_row.set_subtitle("Cloud on" if on else "Cloud off (local answers)")
+        self.overview_cloud_status.set_label("On" if on else "Off")
+
+    def on_save_voice(self, *_):
+        model = ""
+        if self._voice_paths:
+            idx = self.voice_model_row.get_selected()
+            if 0 <= idx < len(self._voice_paths):
+                model = self._voice_paths[idx]
+        updates = {
+            "VOICE_MODEL": model or "~/.local/share/piper/en_GB-southern_english_female-low.onnx",
+            "RATE": f"{self.rate_row.get_value():.2f}".rstrip('0').rstrip('.'),
+            "ENERGY": f"{self.energy_row.get_value():.2f}".rstrip('0').rstrip('.'),
+            "LIFT": f"{self.lift_row.get_value():.2f}".rstrip('0').rstrip('.'),
+            "STOP_GRACE": f"{self.stop_grace_row.get_value():.2f}".rstrip('0').rstrip('.'),
+            "SPEAK_DELAY": f"{self.speak_delay_row.get_value():.2f}".rstrip('0').rstrip('.'),
+        }
+        write_conf("voice.conf", updates)
+        self.toast("Voice settings saved")
+
+    def on_save_persona(self, *_):
+        affs = ["none", "friendly", "warm", "loving"]
+        aff = affs[self.affection_row.get_selected()] if self.affection_row.get_selected() < len(affs) else "friendly"
+        updates = {
+            "ASSISTANT_NAME": self.name_entry.get_text().strip() or "Ruby",
+            "HONORIFICS": self.honorifics_entry.get_text().strip() or "Sir",
+            "HONORIFIC_IDLE_SECONDS": str(int(self.idle_row.get_value())),
+            "HONORIFIC_ON_ERRORS": "1" if self.errors_row.get_active() else "0",
+            "AFFECTION": aff,
+            "LIKES": self.likes_entry.get_text().strip(),
+            "DISLIKES": self.dislikes_entry.get_text().strip(),
+        }
+        write_conf("persona.conf", updates)
+        self.toast("Persona & personality saved")
+
+    def on_save_cloud(self, *_):
+        updates = {
+            "CLOUD_ENABLED": "1" if self.cloud_enabled.get_active() else "0",
+            "CLOUD_API_KEY": self.cloud_key.get_text().strip(),
+            "CLOUD_BASE_URL": self.cloud_url.get_text().strip() or "https://api.groq.com/openai/v1",
+            "CLOUD_MODEL": self.cloud_model.get_text().strip() or "llama-3.1-8b-instant",
+            "CLOUD_DAILY_CAP": str(int(self.cloud_cap.get_value())),
+            "CLOUD_LIMIT_COOLDOWN": str(int(self.cloud_cooldown.get_value())),
+        }
+        write_conf("cloud.conf", updates)
+        self.refresh_usage()
+        self.toast("Cloud settings saved")
+
+    def on_test_voice(self, *_):
+        # save voice first so test uses current UI values? easier to save
+        self.on_save_voice()
+        name = self.name_entry.get_text().strip() or "Ruby"
+        affs = ["none", "friendly", "warm", "loving"]
+        aff = affs[self.affection_row.get_selected()] if self.affection_row.get_selected() < len(affs) else "friendly"
+        if aff == "loving":
+            msg = f"I'm {name}. I love being here with you. How can I help?"
+        elif aff == "warm":
+            msg = f"I'm {name}. It's good to hear from you. How can I help?"
+        else:
+            msg = f"I'm {name}, your voice assistant on Omarchy. How can I help?"
+        say = BIN_DIR / "local-voice-say"
+        if say.exists():
+            run_cmd([str(say), msg])
+            self.toast("Playing sample…")
+        else:
+            self.toast("local-voice-say not found")
+
+
+class RubyEngineApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
+
+    def do_activate(self):
+        win = self.props.active_window
+        if not win:
+            win = RubyEngineWindow(application=self)
+        win.present()
+
+
+def main():
+    app = RubyEngineApp()
+    return app.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,20 @@
+# Ruby voice & timing — copy to ~/.config/voice-assistant/voice.conf (chmod 600)
+# Applied on next speech/command. Env vars (VOICE_RATE etc.) override these.
+
+# Piper voice model (.onnx). Default: southern English female.
+VOICE_MODEL=~/.local/share/piper/en_GB-southern_english_female-low.onnx
+
+# Piper length-scale: lower = faster, higher = slower (1.0 = model default).
+RATE=1.0
+
+# Piper noise-scale: higher = more expressive (default ~0.667).
+ENERGY=0.8
+
+# Rubberband pitch lift: higher = brighter, tempo untouched.
+LIFT=1.05
+
+# Seconds to keep recording after you press Insert to stop (avoid cut-off).
+STOP_GRACE=0.3
+
+# Seconds to wait before playing speech (avoid overlap/clipping).
+SPEAK_DELAY=0.15

@@ -22,11 +22,13 @@ Local-first and offline-capable. Core control, STT, TTS, translation, and Q&A ru
 * `bin/local-voice-exec` — computer-use via hypruse: "what do you see", "click Save", "scroll down", "press Escape", "type X and press enter", "open firefox on workspace 3"
 * Chitchat: rotating jokes ("tell me a joke"), fun facts, and friendly answers (compliments, favorites, "will you marry me") — all offline, all in her voice
 * `bin/local-voice-tts` / `local-voice-say` — Siri voice: Piper `en_GB-southern_english_female-low` (offline, sub-second, mastered to 48k/24-bit)
+* `bin/ruby-engine` — **Ruby Engine** native GTK4/libadwaita app to customize voice, persona/personality, cloud brain, and timing
 * `bin/local-voice-calendar` — merged iCloud home+work feeds (today/tomorrow/next)
 * `bin/local-voice-translate` — offline translation (local Ollama by default; LibreTranslate or argos opt-in)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
 * `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
-* `config/*.example` — calendar, weather, translation, cloud, and persona templates (`ASSISTANT_NAME`, default Ruby)
+* `applications/ruby-engine.desktop` — app launcher (shows in Omarchy app menu)
+* `config/*.example` — calendar, weather, translation, cloud, voice, and persona templates (`ASSISTANT_NAME`, default Ruby)
 
 ## 🚀 Install
 
@@ -60,9 +62,18 @@ Add the keybinding to `~/.config/hypr/bindings.lua`, then `hyprctl reload`:
 o.bind("Insert", "Ruby: talk / send", "local-voice toggle")
 ```
 
+## 💎 Ruby Engine (native app)
+
+Launch **Ruby Engine** from your app menu (or run `ruby-engine`) to customize Ruby in a native GTK4/libadwaita app:
+
+* **Voice:** pick any installed Piper voice, adjust speed/expressiveness/pitch, and tune stop grace/speak delay. Test playback instantly.
+* **Persona & personality:** assistant name, honorifics, affection level (none/friendly/warm/**loving** — warm, caring, devoted tone), plus things you like/dislike so her answers feel personal.
+* **Cloud brain:** enable/configure an OpenAI-compatible provider (e.g. Groq) with daily cap and automatic local fallback on limit/error.
+* Settings are saved to `~/.config/voice-assistant/*.conf` and apply on the next response.
+
 ## 🔊 Voice
 
-Siri speaks with Piper `en_GB-southern_english_female-low` — stock British female voice pitch-matched to your recording (median F0/range overlap beat jenny, cori and alba on identical text). Fully offline, sub-second replies, no warm-up, no background jobs. Other British female options already on disk: `en_GB-jenny_dioco-medium`, `en_GB-cori-high`, `en_GB-alba-medium` — point `VOICE_MODEL` at one in `bin/local-voice-tts` to switch.
+Ruby speaks with Piper (default `en_GB-southern_english_female-low`) — fully offline, sub-second. Customize voice and timing in Ruby Engine or `~/.config/voice-assistant/voice.conf` (`VOICE_MODEL`, `RATE`, `ENERGY`, `LIFT`, `STOP_GRACE`, `SPEAK_DELAY`). Other installed Piper voices can be selected in Ruby Engine.
 
 ## 📅 Calendar
 

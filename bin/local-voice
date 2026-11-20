@@ -68,8 +68,14 @@ stop_recording() {
     notify-send -t 1000 "Voice" "Stopped listening — processing..." 2>/dev/null || true
     # Grace period: let pw-record capture the tail end of speech so the last
     # word/syllable isn't cut off when you press Insert while finishing a sentence.
-    # Tune with VOICE_STOP_GRACE (seconds); default 0.3s.
-    grace="${VOICE_STOP_GRACE:-0.3}"
+    # Configurable via voice.conf or VOICE_STOP_GRACE env; default 0.3s.
+    grace="0.3"
+    VOICE_CONF="$HOME/.config/voice-assistant/voice.conf"
+    if [[ -f "$VOICE_CONF" ]]; then
+        cfg_grace=$(grep -E '^[[:space:]]*(STOP_GRACE|VOICE_STOP_GRACE)[[:space:]]*=' "$VOICE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "${cfg_grace:-}" ]] && grace="$cfg_grace"
+    fi
+    grace="${VOICE_STOP_GRACE:-$grace}"
     if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
         sleep "$grace" 2>/dev/null || sleep 0.4
     fi

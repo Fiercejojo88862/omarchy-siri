@@ -111,7 +111,7 @@ def init_config() -> int:
     persona or API key.
     """
     wrote, kept = [], []
-    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf"):
+    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf", "voice.conf"):
         dst = CONFIG_DIR / name
         if dst.exists():
             kept.append(name)
@@ -385,7 +385,10 @@ def _persona_conf() -> dict:
     conf = {"name": _DEFAULT_NAME,
             "honorifics": _DEFAULT_HONORIFICS,
             "idle": _DEFAULT_IDLE_SECONDS,
-            "on_errors": True}
+            "on_errors": True,
+            "affection": "friendly",
+            "likes": "",
+            "dislikes": ""}
     values: dict[str, str] = {}
     try:
         for line in PERSONA_CONF.read_text().splitlines():
@@ -412,6 +415,11 @@ def _persona_conf() -> dict:
         pass
     if values.get("HONORIFIC_ON_ERRORS", "").strip().lower() in ("0", "false", "no", "off"):
         conf["on_errors"] = False
+    aff = values.get("AFFECTION", "").strip().lower()
+    if aff in ("none", "friendly", "warm", "loving", "devoted"):
+        conf["affection"] = "loving" if aff == "devoted" else aff
+    conf["likes"] = values.get("LIKES", "").strip()[:300]
+    conf["dislikes"] = values.get("DISLIKES", "").strip()[:300]
     return conf
 
 
@@ -419,6 +427,9 @@ _PERSONA = _persona_conf()
 _NAME = _PERSONA["name"]
 _HONORIFICS_START = _PERSONA["honorifics"]
 IDLE_SECONDS = _PERSONA["idle"]
+_AFFECTION = _PERSONA.get("affection", "friendly")
+_LIKES = _PERSONA.get("likes", "")
+_DISLIKES = _PERSONA.get("dislikes", "")
 
 
 def _touch_interaction() -> None:
@@ -809,7 +820,12 @@ def _next_rot(path_name: str, n: int) -> int:
 def _handle_conversational(norm: str) -> bool:
     reply = ""
     if re.fullmatch(r"(hi|hey|hello|yo|hiya|howdy|greetings|hey there|hi there|good morning|good afternoon|good evening)[.! ]*", norm):
-        reply = "Hey! What can I do for you?"
+        if _AFFECTION == "loving":
+            reply = "Hey, love. I'm so happy to hear you. What can I do for you?"
+        elif _AFFECTION == "warm":
+            reply = "Hey! It's good to hear from you. What can I do for you?"
+        else:
+            reply = "Hey! What can I do for you?"
     elif re.fullmatch(r"(thanks|thank you|thankyou|thx|thanks a lot|thank you so much|appreciated|much appreciated)[.! ]*", norm):
         reply = "Anytime!"
     elif re.fullmatch(r"(bye|goodbye|good ?night|see you|see ya|later|talk to you later|good talk)[.! ]*", norm):
@@ -830,7 +846,12 @@ def _handle_conversational(norm: str) -> bool:
             return True
         reply = "No problem."
     elif re.search(r"i love you|you'?re (the best|awesome|amazing|great)|love ya", norm):
-        reply = "That's very kind of you to say!"
+        if _AFFECTION == "loving" and re.search(r"i love you|love ya", norm):
+            reply = f"I love you too. I'm always here with you."
+        elif _AFFECTION == "loving":
+            reply = "That means so much to me. I adore helping you."
+        else:
+            reply = "That's very kind of you to say!"
     elif re.search(r"tell me a joke|say something funny|make me laugh|got any jokes|another joke|joke please|give me a joke|i need a laugh", norm):
         reply = _JOKES[_next_rot("joke_idx", len(_JOKES))]
     elif re.search(r"you'?re (funny|hilarious|so funny)", norm):
@@ -3292,6 +3313,22 @@ _QA_SYSTEM = (
 )
 
 
+def _personality_prompt() -> str:
+    parts = []
+    if _AFFECTION == "loving":
+        parts.append("Tone: warm, caring, devoted, and affectionate toward the user. "
+                     "Show genuine care and fondness in a tasteful, supportive way.")
+    elif _AFFECTION == "warm":
+        parts.append("Tone: warm, friendly, and encouraging.")
+    elif _AFFECTION == "none":
+        parts.append("Tone: neutral and matter-of-fact.")
+    if _LIKES:
+        parts.append(f"User likes: {_LIKES}.")
+    if _DISLIKES:
+        parts.append(f"User dislikes (avoid suggesting): {_DISLIKES}.")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def _speakable_answer(text: str, limit: int = 420) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"`([^`]*)`", r"\1", text)
@@ -3307,7 +3344,7 @@ def _speakable_answer(text: str, limit: int = 420) -> str:
 
 def ask_ai(question: str, context: str = "") -> str | None:
     """Answer an open-ended question: cloud first (if enabled), else local."""
-    sysmsg = _QA_SYSTEM.format(name=_NAME)
+    sysmsg = _QA_SYSTEM.format(name=_NAME) + _personality_prompt()
     if context:
         user = f"Context:\n{context[:1800]}\n\nQuestion: {question}"
     else:
