@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Ruby Engine — native settings and control app for Ruby on Omarchy.
 
-A premium GTK4/libadwaita app to customize Ruby's voice, persona, personality
-(including affection), cloud brain, and timing. Reads/writes the same config
-files as the voice assistant (~/.config/voice-assistant/*.conf).
+Customize Ruby's voice, persona, wake word ("Hey Ruby"), cloud brain, and more.
+Reads/writes the same config files as the voice assistant.
 """
 
 import glob
+import json
 import os
-import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +25,8 @@ CONF_DIR = Path.home() / ".config/voice-assistant"
 STATE_DIR = Path.home() / ".local/state/voice-assistant"
 BIN_DIR = Path.home() / ".local/bin"
 PIPER_DIR = Path.home() / ".local/share/piper"
+AUTOSTART_DIR = Path.home() / ".config/autostart"
+WAKE_AUTOSTART = AUTOSTART_DIR / "ruby-wake.desktop"
 
 
 def ensure_conf_dir():
@@ -50,7 +52,6 @@ def read_conf(name: str) -> dict:
 
 
 def write_conf(name: str, updates: dict, template: Path | None = None):
-    """Update keys in a conf file, preserving comments/other lines when possible."""
     ensure_conf_dir()
     path = CONF_DIR / name
     lines = []
@@ -95,7 +96,6 @@ def list_piper_voices():
     if PIPER_DIR.is_dir():
         for onnx in sorted(PIPER_DIR.glob("*.onnx")):
             voices.append(str(onnx))
-    # also common alt locations
     for pat in ["/usr/share/piper/voices/*.onnx", "/usr/local/share/piper/*.onnx"]:
         for onnx in sorted(glob.glob(pat)):
             if onnx not in voices:
@@ -105,8 +105,7 @@ def list_piper_voices():
 
 def voice_display_name(path: str) -> str:
     name = Path(path).stem
-    name = name.replace("_", " ").replace("-", " ")
-    return name
+    return name.replace("_", " ").replace("-", " ")
 
 
 def run_cmd(argv, **kw):
@@ -117,18 +116,34 @@ def run_cmd(argv, **kw):
         return None
 
 
-def which(cmd):
-    return shutil.which(cmd) if 'shutil' in globals() else __import__('shutil').which(cmd)
+def run_capture(argv):
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
 
 
-import shutil  # noqa: E402
+def ruby_image_path():
+    here = Path(__file__).resolve().parent.parent
+    candidates = [
+        here / "assets" / "ruby-assistant.png",
+        here / "assets" / "ruby-assistant.jpg",
+        Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.png",
+        Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
+        here / "assets" / "ruby-icon.jpg",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return ""
 
 
 class RubyEngineWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.set_title("Ruby Engine")
-        self.set_default_size(920, 720)
+        self.set_default_size(980, 760)
 
         self.toast_overlay = Adw.ToastOverlay()
         self.set_content(self.toast_overlay)
@@ -137,8 +152,8 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.toast_overlay.set_child(toolbar_view)
 
         header = Adw.HeaderBar()
-        title = Adw.WindowTitle(title="Ruby Engine", subtitle="Ruby on Omarchy")
-        header.set_title_widget(title)
+        self.title_widget = Adw.WindowTitle(title="Ruby Engine", subtitle="Ruby on Omarchy")
+        header.set_title_widget(self.title_widget)
 
         test_btn = Gtk.Button(icon_name="audio-volume-high-symbolic", tooltip_text="Test voice")
         test_btn.add_css_class("flat")
@@ -155,21 +170,22 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         view_switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
         header.set_title_widget(view_switcher)
 
+        self._voice_paths = []
         self.build_overview_page()
         self.build_voice_page()
         self.build_persona_page()
+        self.build_wake_page()
         self.build_cloud_page()
 
         self.load_all()
 
     def toast(self, msg):
-        t = Adw.Toast(title=msg, timeout=3)
-        self.toast_overlay.add_toast(t)
+        self.toast_overlay.add_toast(Adw.Toast(title=msg, timeout=3))
 
     def page_scroller(self, child):
         sc = Gtk.ScrolledWindow(vexpand=True)
         sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        clamp = Adw.Clamp(maximum_size=760, tightening_threshold=600)
+        clamp = Adw.Clamp(maximum_size=820, tightening_threshold=640)
         clamp.set_margin_top(24)
         clamp.set_margin_bottom(24)
         clamp.set_margin_start(16)
@@ -180,61 +196,84 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         sc.set_child(clamp)
         return sc
 
+    def make_avatar(self, size=140):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER)
+        img_path = ruby_image_path()
+        if img_path:
+            try:
+                texture = Gdk.Texture.new_from_filename(img_path)
+                pic = Gtk.Picture.new_for_paintable(texture)
+                pic.set_size_request(size, size)
+                pic.set_content_fit(Gtk.ContentFit.COVER)
+                pic.set_can_shrink(True)
+                pic.add_css_class("card")
+                frame = Gtk.Frame()
+                frame.set_child(pic)
+                frame.set_halign(Gtk.Align.CENTER)
+                box.append(frame)
+                return box
+            except Exception:
+                pass
+        icon = Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic")
+        icon.set_pixel_size(size)
+        box.append(icon)
+        return box
+
     # ---------- Overview ----------
     def build_overview_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
 
-        hero = Adw.StatusPage()
-        hero.set_title("Ruby")
-        hero.set_description("Your voice intelligence on Omarchy — local-first, fast, and yours.")
-        # Avatar lives in the app (not as a floating desktop overlay).
-        try:
-            here = Path(__file__).resolve().parent.parent
-            candidates = [
-                here / "assets" / "ruby-assistant.png",
-                here / "assets" / "ruby-assistant.jpg",
-                Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.png",
-                Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
-                here / "assets" / "ruby-icon.jpg",
-            ]
-            img = next((str(p) for p in candidates if p.exists()), "")
-            if img:
-                texture = Gdk.Texture.new_from_filename(img)
-                hero.set_paintable(texture)
-            else:
-                hero.set_icon_name("audio-input-microphone-symbolic")
-        except Exception:
-            hero.set_icon_name("audio-input-microphone-symbolic")
-        page.append(hero)
+        avatar = self.make_avatar(180)
+        page.append(avatar)
 
-        group = Adw.PreferencesGroup(title="Quick actions")
-        row = Adw.ActionRow(title="Say hello", subtitle="Make Ruby speak a test phrase")
-        btn = Gtk.Button(label="Speak", valign=Gtk.Align.CENTER)
-        btn.add_css_class("suggested-action")
-        btn.connect("clicked", self.on_test_voice)
-        row.add_suffix(btn)
-        row.set_activatable_widget(btn)
-        group.add(row)
+        self.hero_title = Gtk.Label(label="Ruby")
+        self.hero_title.add_css_class("title-1")
+        self.hero_sub = Gtk.Label(label="Your voice intelligence on Omarchy — local-first, fast, and yours.")
+        self.hero_sub.add_css_class("dim-label")
+        self.hero_sub.set_wrap(True)
+        self.hero_sub.set_justify(Gtk.Justification.CENTER)
+        page.append(self.hero_title)
+        page.append(self.hero_sub)
 
-        row2 = Adw.ActionRow(title="Push-to-talk", subtitle="Press Insert to talk, press again to send")
-        badge = Gtk.Label(label="Insert")
-        badge.add_css_class("dim-label")
-        badge.set_valign(Gtk.Align.CENTER)
-        row2.add_suffix(badge)
-        group.add(row2)
+        status_group = Adw.PreferencesGroup(title="Status")
+        row = Adw.ActionRow(title="Wake word (Hey Ruby)", subtitle="Hands-free listening when enabled")
+        self.overview_wake_status = Gtk.Label(label="Off")
+        self.overview_wake_status.add_css_class("dim-label")
+        self.overview_wake_status.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(self.overview_wake_status)
+        status_group.add(row)
 
-        row3 = Adw.ActionRow(title="Cloud brain", subtitle="Use a fast cloud model for open-ended answers (falls back to local)")
+        row2 = Adw.ActionRow(title="Cloud brain", subtitle="Faster open-ended answers with local fallback")
         self.overview_cloud_status = Gtk.Label(label="Off")
         self.overview_cloud_status.add_css_class("dim-label")
         self.overview_cloud_status.set_valign(Gtk.Align.CENTER)
-        row3.add_suffix(self.overview_cloud_status)
-        group.add(row3)
-        page.append(group)
+        row2.add_suffix(self.overview_cloud_status)
+        status_group.add(row2)
 
-        group2 = Adw.PreferencesGroup(title="About Ruby Engine")
-        row4 = Adw.ActionRow(title="Native settings app", subtitle="Customize voice, personality, cloud brain, and timing for Ruby on Omarchy")
-        group2.add(row4)
-        page.append(group2)
+        row3 = Adw.ActionRow(title="Push-to-talk", subtitle="Press Insert to talk, press again to send")
+        badge = Gtk.Label(label="Insert")
+        badge.add_css_class("dim-label")
+        badge.set_valign(Gtk.Align.CENTER)
+        row3.add_suffix(badge)
+        status_group.add(row3)
+        page.append(status_group)
+
+        actions = Adw.PreferencesGroup(title="Quick actions")
+        row4 = Adw.ActionRow(title="Say hello", subtitle="Make Ruby speak a sample")
+        btn = Gtk.Button(label="Speak", valign=Gtk.Align.CENTER)
+        btn.add_css_class("suggested-action")
+        btn.connect("clicked", self.on_test_voice)
+        row4.add_suffix(btn)
+        row4.set_activatable_widget(btn)
+        actions.add(row4)
+
+        row5 = Adw.ActionRow(title="Start / stop wake word", subtitle="Toggle hands-free “Hey Ruby” listening")
+        self.wake_toggle_btn = Gtk.Button(label="Toggle", valign=Gtk.Align.CENTER)
+        self.wake_toggle_btn.connect("clicked", self.on_toggle_wake)
+        row5.add_suffix(self.wake_toggle_btn)
+        row5.set_activatable_widget(self.wake_toggle_btn)
+        actions.add(row5)
+        page.append(actions)
 
         self.stack.add_titled_with_icon(self.page_scroller(page), "overview", "Overview", "user-home-symbolic")
 
@@ -243,20 +282,20 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
 
         group = Adw.PreferencesGroup(title="Voice", description="Piper TTS — offline, fast. Changes apply on next spoken response.")
-        self.voice_model_row = Adw.ComboRow(title="Voice model", subtitle="Piper .onnx voice")
+        self.voice_model_row = Adw.ComboRow(title="Voice model", subtitle="Installed Piper (.onnx) voices")
         self.voice_model_store = Gtk.StringList()
         self.voice_model_row.set_model(self.voice_model_store)
         group.add(self.voice_model_row)
 
-        self.rate_row = Adw.SpinRow.new_with_range(0.5, 1.6, 0.05)
+        self.rate_row = Adw.SpinRow.new_with_range(0.5, 1.8, 0.05)
         self.rate_row.set_title("Speed (length scale)")
-        self.rate_row.set_subtitle("Higher = slower, clearer (1.0 is model default)")
+        self.rate_row.set_subtitle("Higher = slower, clearer (1.0 default)")
         self.rate_row.set_value(1.0)
         group.add(self.rate_row)
 
         self.energy_row = Adw.SpinRow.new_with_range(0.2, 1.5, 0.05)
-        self.energy_row.set_title("Expressiveness (noise)")
-        self.energy_row.set_subtitle("Higher = more lively delivery")
+        self.energy_row.set_title("Expressiveness")
+        self.energy_row.set_subtitle("Noise/energy — higher = more lively")
         self.energy_row.set_value(0.8)
         group.add(self.energy_row)
 
@@ -267,7 +306,11 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.lift_row.set_value(1.05)
         group.add(self.lift_row)
 
-        test_row = Adw.ActionRow(title="Test voice", subtitle="Speak a sample with current settings")
+        self.sample_text_row = Adw.EntryRow(title="Test phrase")
+        self.sample_text_row.set_text("I'm Ruby, your voice assistant on Omarchy. How can I help?")
+        group.add(self.sample_text_row)
+
+        test_row = Adw.ActionRow(title="Test voice", subtitle="Speak the test phrase with current settings")
         test_btn = Gtk.Button(label="Play sample", valign=Gtk.Align.CENTER)
         test_btn.connect("clicked", self.on_test_voice)
         test_row.add_suffix(test_btn)
@@ -275,7 +318,7 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         group.add(test_row)
         content.append(group)
 
-        group2 = Adw.PreferencesGroup(title="Timing", description="Tune responsiveness and cut-off behavior.")
+        group2 = Adw.PreferencesGroup(title="Behavior & timing")
         self.stop_grace_row = Adw.SpinRow.new_with_range(0.0, 1.5, 0.05)
         self.stop_grace_row.set_title("Stop grace (seconds)")
         self.stop_grace_row.set_subtitle("Keep recording after Insert to capture sentence endings")
@@ -287,6 +330,11 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.speak_delay_row.set_subtitle("Pause before playback to avoid overlap/clipping")
         self.speak_delay_row.set_value(0.15)
         group2.add(self.speak_delay_row)
+
+        self.show_heard_row = Adw.SwitchRow(title="Show “Heard” notification")
+        self.show_heard_row.set_subtitle("Display transcribed text after push-to-talk")
+        self.show_heard_row.set_active(True)
+        group2.add(self.show_heard_row)
         content.append(group2)
 
         save = Gtk.Button(label="Save voice settings", halign=Gtk.Align.END)
@@ -313,7 +361,7 @@ class RubyEngineWindow(Adw.ApplicationWindow):
 
         self.idle_row = Adw.SpinRow.new_with_range(30, 3600, 10)
         self.idle_row.set_title("Conversation idle (seconds)")
-        self.idle_row.set_subtitle("Silence before she treats the next reply as a new conversation start")
+        self.idle_row.set_subtitle("Silence before a reply is treated as a new conversation start")
         self.idle_row.set_value(180)
         group.add(self.idle_row)
 
@@ -323,9 +371,9 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         group.add(self.errors_row)
         content.append(group)
 
-        group2 = Adw.PreferencesGroup(title="Personality", description="How Ruby relates to you. 'Loving' makes her warm, caring, devoted, and affectionate in a tasteful way.")
+        group2 = Adw.PreferencesGroup(title="Personality", description="Tune how Ruby relates to you.")
         self.affection_row = Adw.ComboRow(title="Affection")
-        self.affection_row.set_subtitle("Tone toward you in conversation and AI answers")
+        self.affection_row.set_subtitle("none, friendly, warm, or loving")
         self.affection_store = Gtk.StringList.new(["none", "friendly", "warm", "loving"])
         self.affection_row.set_model(self.affection_store)
         group2.add(self.affection_row)
@@ -337,6 +385,10 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.dislikes_entry = Adw.EntryRow(title="Things you dislike")
         self.dislikes_entry.set_tooltip_text("Comma-separated; Ruby avoids suggesting these")
         group2.add(self.dislikes_entry)
+
+        self.extra_row = Adw.EntryRow(title="Personality notes")
+        self.extra_row.set_tooltip_text("Extra instructions for tone/behavior (short, optional)")
+        group2.add(self.extra_row)
         content.append(group2)
 
         save = Gtk.Button(label="Save persona & personality", halign=Gtk.Align.END)
@@ -346,6 +398,63 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         content.append(save)
 
         self.stack.add_titled_with_icon(self.page_scroller(content), "persona", "Persona", "avatar-default-symbolic")
+
+    # ---------- Wake Word ----------
+    def build_wake_page(self):
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+
+        group = Adw.PreferencesGroup(title="Wake word", description="Say “Hey Ruby” (or your assistant name) to talk hands-free. This runs a lightweight listener using Whisper chunks; push-to-talk (Insert) always works.")
+        self.wake_status_row = Adw.ActionRow(title="Listener status", subtitle="—")
+        self.wake_status_label = Gtk.Label(label="Stopped")
+        self.wake_status_label.add_css_class("dim-label")
+        self.wake_status_label.set_valign(Gtk.Align.CENTER)
+        self.wake_status_row.add_suffix(self.wake_status_label)
+
+        self.wake_start_btn = Gtk.Button(label="Start", valign=Gtk.Align.CENTER)
+        self.wake_start_btn.connect("clicked", lambda *_: self.set_wake_running(True))
+        self.wake_stop_btn = Gtk.Button(label="Stop", valign=Gtk.Align.CENTER)
+        self.wake_stop_btn.connect("clicked", lambda *_: self.set_wake_running(False))
+        box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        box.append(self.wake_start_btn)
+        box.append(self.wake_stop_btn)
+        self.wake_status_row.add_suffix(box)
+        group.add(self.wake_status_row)
+
+        self.wake_autostart_row = Adw.SwitchRow(title="Start on login")
+        self.wake_autostart_row.set_subtitle("Automatically start the wake-word listener when you log in")
+        group.add(self.wake_autostart_row)
+
+        self.wake_phrases_row = Adw.EntryRow(title="Wake phrases")
+        self.wake_phrases_row.set_tooltip_text("Comma-separated, lowercase. Leave empty for defaults like “hey ruby, hi ruby”.")
+        group.add(self.wake_phrases_row)
+
+        self.wake_cmd_row = Adw.SpinRow.new_with_range(2, 15, 0.5)
+        self.wake_cmd_row.set_title("Command listen time (seconds)")
+        self.wake_cmd_row.set_subtitle("How long to listen after hearing only the wake word")
+        self.wake_cmd_row.set_value(6)
+        group.add(self.wake_cmd_row)
+
+        self.wake_chunk_row = Adw.SpinRow.new_with_range(1.5, 5, 0.5)
+        self.wake_chunk_row.set_title("Detection chunk (seconds)")
+        self.wake_chunk_row.set_subtitle("Shorter = more responsive, but uses more CPU")
+        self.wake_chunk_row.set_value(2.5)
+        group.add(self.wake_chunk_row)
+        content.append(group)
+
+        tips = Adw.PreferencesGroup(title="How to use")
+        tips.add(Adw.ActionRow(title="Say the wake word", subtitle="Try: “Hey Ruby, what time is it?” or say “Hey Ruby” then your request"))
+        tips.add(Adw.ActionRow(title="Push-to-talk still works", subtitle="Press Insert anytime — wake listening pauses while you hold a PTT recording"))
+        content.append(tips)
+
+        save = Gtk.Button(label="Save wake settings", halign=Gtk.Align.END)
+        save.add_css_class("suggested-action")
+        save.add_css_class("pill")
+        save.connect("clicked", self.on_save_wake)
+        content.append(save)
+
+        self.stack.add_titled_with_icon(self.page_scroller(content), "wake", "Wake Word", "audio-input-microphone-symbolic")
+
+        GLib.timeout_add_seconds(2, self.refresh_wake_status)
 
     # ---------- Cloud ----------
     def build_cloud_page(self):
@@ -394,8 +503,7 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         content.append(group2)
 
         note = Adw.PreferencesGroup()
-        row = Adw.ActionRow(title="Groq tip", subtitle="Free tier: console.groq.com → key, keep default URL/model, enable cloud brain. On limit she switches to local automatically.")
-        note.add(row)
+        note.add(Adw.ActionRow(title="Groq tip", subtitle="Free tier: console.groq.com → key, keep default URL/model, enable cloud brain. On limit she switches to local automatically."))
         content.append(note)
 
         save = Gtk.Button(label="Save cloud settings", halign=Gtk.Align.END)
@@ -446,9 +554,12 @@ class RubyEngineWindow(Adw.ApplicationWindow):
             self.speak_delay_row.set_value(float(v.get("SPEAK_DELAY", v.get("VOICE_SPEAK_DELAY", "0.15"))))
         except Exception:
             self.speak_delay_row.set_value(0.15)
+        self.show_heard_row.set_active(v.get("SHOW_HEARD", "1").lower() not in ("0", "false", "no", "off"))
+        self.sample_text_row.set_text(v.get("SAMPLE_TEXT", "") or "I'm Ruby, your voice assistant on Omarchy. How can I help?")
 
         p = read_conf("persona.conf")
-        self.name_entry.set_text(p.get("ASSISTANT_NAME", "Ruby") or "Ruby")
+        name = p.get("ASSISTANT_NAME", "Ruby") or "Ruby"
+        self.name_entry.set_text(name)
         self.honorifics_entry.set_text(p.get("HONORIFICS", "Sir") or "Sir")
         try:
             self.idle_row.set_value(float(p.get("HONORIFIC_IDLE_SECONDS", "180")))
@@ -461,6 +572,9 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.affection_row.set_selected(aff_map.get(aff, 1))
         self.likes_entry.set_text(p.get("LIKES", "") or "")
         self.dislikes_entry.set_text(p.get("DISLIKES", "") or "")
+        self.extra_row.set_text(p.get("PERSONALITY_NOTES", p.get("EXTRA_INSTRUCTIONS", "")) or "")
+        self.hero_title.set_label(name)
+        self.title_widget.set_subtitle(f"{name} on Omarchy")
 
         c = read_conf("cloud.conf")
         self.cloud_enabled.set_active(c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on"))
@@ -476,14 +590,27 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         except Exception:
             self.cloud_cooldown.set_value(3600)
 
+        w = read_conf("wake.conf")
+        self.wake_phrases_row.set_text(w.get("WAKE_PHRASES", "") or "")
+        try:
+            self.wake_cmd_row.set_value(float(w.get("WAKE_COMMAND_SECONDS", "6")))
+        except Exception:
+            self.wake_cmd_row.set_value(6)
+        try:
+            self.wake_chunk_row.set_value(float(w.get("WAKE_CHUNK_SECONDS", "2.5")))
+        except Exception:
+            self.wake_chunk_row.set_value(2.5)
+        self.wake_autostart_row.set_active(w.get("WAKE_AUTOSTART", "0").lower() in ("1", "true", "yes", "on") or WAKE_AUTOSTART.exists())
+
         self.refresh_usage()
+        self.refresh_wake_status()
 
     def refresh_usage(self):
         usage_path = STATE_DIR / "cloud_usage.json"
         count = 0
         try:
-            import json, datetime
             data = json.loads(usage_path.read_text())
+            import datetime
             today = datetime.datetime.now().strftime("%Y-%m-%d")
             if data.get("date") == today:
                 count = int(data.get("count", 0))
@@ -495,6 +622,41 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.usage_label.set_label(f"{count} / {cap}")
         self.usage_row.set_subtitle("Cloud on" if on else "Cloud off (local answers)")
         self.overview_cloud_status.set_label("On" if on else "Off")
+
+    def wake_running(self):
+        return run_capture([str(BIN_DIR / "local-voice-wake"), "status"]) == "running"
+
+    def refresh_wake_status(self, *_):
+        running = self.wake_running()
+        label = "Running" if running else "Stopped"
+        self.wake_status_label.set_label(label)
+        self.overview_wake_status.set_label("On" if running else "Off")
+        self.wake_start_btn.set_sensitive(not running)
+        self.wake_stop_btn.set_sensitive(running)
+        return True
+
+    def set_wake_running(self, start: bool):
+        cmd = "start" if start else "stop"
+        run_capture([str(BIN_DIR / "local-voice-wake"), cmd])
+        GLib.timeout_add(400, self.refresh_wake_status)
+
+    def on_toggle_wake(self, *_):
+        self.set_wake_running(not self.wake_running())
+
+    def update_wake_autostart(self, enabled: bool):
+        try:
+            AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+            if enabled:
+                WAKE_AUTOSTART.write_text(
+                    "[Desktop Entry]\nType=Application\nName=Ruby Wake Word\n"
+                    "Comment=Start Ruby wake-word listener (Hey Ruby)\n"
+                    "Exec=local-voice-wake start\nX-GNOME-Autostart-enabled=true\n"
+                )
+            else:
+                if WAKE_AUTOSTART.exists():
+                    WAKE_AUTOSTART.unlink()
+        except OSError:
+            pass
 
     def on_save_voice(self, *_):
         model = ""
@@ -509,6 +671,8 @@ class RubyEngineWindow(Adw.ApplicationWindow):
             "LIFT": f"{self.lift_row.get_value():.2f}".rstrip('0').rstrip('.'),
             "STOP_GRACE": f"{self.stop_grace_row.get_value():.2f}".rstrip('0').rstrip('.'),
             "SPEAK_DELAY": f"{self.speak_delay_row.get_value():.2f}".rstrip('0').rstrip('.'),
+            "SHOW_HEARD": "1" if self.show_heard_row.get_active() else "0",
+            "SAMPLE_TEXT": self.sample_text_row.get_text().strip(),
         }
         write_conf("voice.conf", updates)
         self.toast("Voice settings saved")
@@ -516,17 +680,34 @@ class RubyEngineWindow(Adw.ApplicationWindow):
     def on_save_persona(self, *_):
         affs = ["none", "friendly", "warm", "loving"]
         aff = affs[self.affection_row.get_selected()] if self.affection_row.get_selected() < len(affs) else "friendly"
+        name = self.name_entry.get_text().strip() or "Ruby"
         updates = {
-            "ASSISTANT_NAME": self.name_entry.get_text().strip() or "Ruby",
+            "ASSISTANT_NAME": name,
             "HONORIFICS": self.honorifics_entry.get_text().strip() or "Sir",
             "HONORIFIC_IDLE_SECONDS": str(int(self.idle_row.get_value())),
             "HONORIFIC_ON_ERRORS": "1" if self.errors_row.get_active() else "0",
             "AFFECTION": aff,
             "LIKES": self.likes_entry.get_text().strip(),
             "DISLIKES": self.dislikes_entry.get_text().strip(),
+            "PERSONALITY_NOTES": self.extra_row.get_text().strip(),
         }
         write_conf("persona.conf", updates)
+        self.hero_title.set_label(name)
+        self.title_widget.set_subtitle(f"{name} on Omarchy")
         self.toast("Persona & personality saved")
+
+    def on_save_wake(self, *_):
+        enabled = self.wake_autostart_row.get_active()
+        updates = {
+            "WAKE_AUTOSTART": "1" if enabled else "0",
+            "WAKE_PHRASES": self.wake_phrases_row.get_text().strip(),
+            "WAKE_COMMAND_SECONDS": f"{self.wake_cmd_row.get_value():.1f}".rstrip('0').rstrip('.'),
+            "WAKE_CHUNK_SECONDS": f"{self.wake_chunk_row.get_value():.1f}".rstrip('0').rstrip('.'),
+        }
+        write_conf("wake.conf", updates)
+        self.update_wake_autostart(enabled)
+        self.refresh_wake_status()
+        self.toast("Wake word settings saved")
 
     def on_save_cloud(self, *_):
         updates = {
@@ -542,20 +723,21 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.toast("Cloud settings saved")
 
     def on_test_voice(self, *_):
-        # save voice first so test uses current UI values? easier to save
         self.on_save_voice()
         name = self.name_entry.get_text().strip() or "Ruby"
         affs = ["none", "friendly", "warm", "loving"]
         aff = affs[self.affection_row.get_selected()] if self.affection_row.get_selected() < len(affs) else "friendly"
-        if aff == "loving":
-            msg = f"I'm {name}. I love being here with you. How can I help?"
-        elif aff == "warm":
-            msg = f"I'm {name}. It's good to hear from you. How can I help?"
-        else:
-            msg = f"I'm {name}, your voice assistant on Omarchy. How can I help?"
+        sample = self.sample_text_row.get_text().strip()
+        if not sample:
+            if aff == "loving":
+                sample = f"I'm {name}. I love being here with you. How can I help?"
+            elif aff == "warm":
+                sample = f"I'm {name}. It's good to hear from you. How can I help?"
+            else:
+                sample = f"I'm {name}, your voice assistant on Omarchy. How can I help?"
         say = BIN_DIR / "local-voice-say"
         if say.exists():
-            run_cmd([str(say), msg])
+            run_cmd([str(say), sample])
             self.toast("Playing sample…")
         else:
             self.toast("local-voice-say not found")

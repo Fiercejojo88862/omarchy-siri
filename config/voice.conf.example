@@ -18,3 +18,9 @@ STOP_GRACE=0.3
 
 # Seconds to wait before playing speech (avoid overlap/clipping).
 SPEAK_DELAY=0.15
+
+# Show "Heard: ..." notification after transcription (1 = yes, 0 = no).
+SHOW_HEARD=1
+
+# Optional custom phrase for "Test voice" / sample playback.
+SAMPLE_TEXT=

@@ -111,7 +111,7 @@ def init_config() -> int:
     persona or API key.
     """
     wrote, kept = [], []
-    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf", "voice.conf"):
+    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf", "voice.conf", "wake.conf"):
         dst = CONFIG_DIR / name
         if dst.exists():
             kept.append(name)
@@ -388,7 +388,8 @@ def _persona_conf() -> dict:
             "on_errors": True,
             "affection": "friendly",
             "likes": "",
-            "dislikes": ""}
+            "dislikes": "",
+            "extra": ""}
     values: dict[str, str] = {}
     try:
         for line in PERSONA_CONF.read_text().splitlines():
@@ -420,6 +421,8 @@ def _persona_conf() -> dict:
         conf["affection"] = "loving" if aff == "devoted" else aff
     conf["likes"] = values.get("LIKES", "").strip()[:300]
     conf["dislikes"] = values.get("DISLIKES", "").strip()[:300]
+    extra = values.get("PERSONALITY_NOTES", "") or values.get("EXTRA_INSTRUCTIONS", "")
+    conf["extra"] = extra.strip()[:500]
     return conf
 
 
@@ -430,6 +433,7 @@ IDLE_SECONDS = _PERSONA["idle"]
 _AFFECTION = _PERSONA.get("affection", "friendly")
 _LIKES = _PERSONA.get("likes", "")
 _DISLIKES = _PERSONA.get("dislikes", "")
+_EXTRA_PERSONA = _PERSONA.get("extra", "")
 
 
 def _touch_interaction() -> None:
@@ -3380,6 +3384,8 @@ def _personality_prompt() -> str:
         parts.append(f"User likes: {_LIKES}.")
     if _DISLIKES:
         parts.append(f"User dislikes (avoid suggesting): {_DISLIKES}.")
+    if _EXTRA_PERSONA:
+        parts.append(f"Additional instructions: {_EXTRA_PERSONA}")
     return (" " + " ".join(parts)) if parts else ""
 
 

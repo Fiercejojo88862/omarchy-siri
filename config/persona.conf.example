@@ -32,3 +32,7 @@ LIKES=
 # DISLIKES: comma-separated things you dislike (she avoids suggesting them).
 DISLIKES=
 
+# PERSONALITY_NOTES: extra instructions for Ruby's tone/behavior (optional, short).
+# Example: "Be playful and encouraging. Call me champ sometimes."
+PERSONALITY_NOTES=
+

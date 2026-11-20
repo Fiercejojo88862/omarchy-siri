@@ -1,0 +1,15 @@
+# Wake word ("Hey Ruby") — copy to ~/.config/voice-assistant/wake.conf (chmod 600)
+# Used by local-voice-wake. Push-to-talk (Insert) always works.
+
+# Enable auto-start of wake listener at login (managed by Ruby Engine): 1 or 0
+WAKE_AUTOSTART=0
+
+# Comma-separated wake phrases (lowercase). Default is based on ASSISTANT_NAME.
+# Example: hey ruby,hi ruby,ok ruby
+WAKE_PHRASES=
+
+# Seconds to listen for your command after the wake word is heard alone.
+WAKE_COMMAND_SECONDS=6
+
+# Chunk length (seconds) for wake detection scans (2-4 recommended).
+WAKE_CHUNK_SECONDS=2.5

@@ -22,13 +22,14 @@ Local-first and offline-capable. Core control, STT, TTS, translation, and Q&A ru
 * `bin/local-voice-exec` — computer-use via hypruse: "what do you see", "click Save", "scroll down", "press Escape", "type X and press enter", "open firefox on workspace 3"
 * Chitchat: rotating jokes ("tell me a joke"), fun facts, and friendly answers (compliments, favorites, "will you marry me") — all offline, all in her voice
 * `bin/local-voice-tts` / `local-voice-say` — Siri voice: Piper `en_GB-southern_english_female-low` (offline, sub-second, mastered to 48k/24-bit)
-* `bin/ruby-engine` — **Ruby Engine** native GTK4/libadwaita app to customize voice, persona/personality, cloud brain, and timing
+* `bin/ruby-engine` — **Ruby Engine** native GTK4/libadwaita app to customize voice, persona/personality, wake word, cloud brain, and more
+* `bin/local-voice-wake` — optional wake-word listener (“Hey Ruby”) for hands-free activation
 * `bin/local-voice-calendar` — merged iCloud home+work feeds (today/tomorrow/next)
 * `bin/local-voice-translate` — offline translation (local Ollama by default; LibreTranslate or argos opt-in)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
 * `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
 * `applications/ruby-engine.desktop` — app launcher (shows in Omarchy app menu)
-* `config/*.example` — calendar, weather, translation, cloud, voice, and persona templates (`ASSISTANT_NAME`, default Ruby)
+* `config/*.example` — calendar, weather, translation, cloud, voice, wake, and persona templates (`ASSISTANT_NAME`, default Ruby)
 
 ## 🚀 Install
 
@@ -66,10 +67,12 @@ o.bind("Insert", "Ruby: talk / send", "local-voice toggle")
 
 Launch **Ruby Engine** from your app menu (or run `ruby-engine`) to customize Ruby in a native GTK4/libadwaita app:
 
-* **Voice:** pick any installed Piper voice, adjust speed/expressiveness/pitch, and tune stop grace/speak delay. Test playback instantly.
-* **Persona & personality:** assistant name, honorifics, affection level (none/friendly/warm/**loving** — warm, caring, devoted tone), plus things you like/dislike so her answers feel personal.
+* **Avatar & status:** Ruby’s picture is shown in-app with quick status/actions.
+* **Voice:** pick any installed Piper voice, adjust speed/expressiveness/pitch, tune stop grace/speak delay, set a custom test phrase, and toggle “Heard” transcription notifications.
+* **Persona & personality:** assistant name, honorifics, affection level (none/friendly/warm/**loving**), likes/dislikes, and extra personality notes so her answers feel personal.
+* **Wake word:** say **“Hey Ruby”** (or your chosen name/phrases) for hands-free listening. Start/stop the listener, configure phrases/timing, and optionally auto-start on login.
 * **Cloud brain:** enable/configure an OpenAI-compatible provider (e.g. Groq) with daily cap and automatic local fallback on limit/error.
-* Settings are saved to `~/.config/voice-assistant/*.conf` and apply on the next response.
+* Settings are saved to `~/.config/voice-assistant/*.conf` and apply on the next response/command.
 
 ## 🔊 Voice
 

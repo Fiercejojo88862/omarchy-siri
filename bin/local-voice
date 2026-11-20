@@ -122,7 +122,15 @@ stop_recording() {
             exec ~/.local/bin/local-voice-exec "shazam this"
         fi
         # Show what was heard for quick feedback/debugging, then dispatch.
-        notify-send -t 1200 "Ruby" "Heard: $TEXT" 2>/dev/null || true
+        SHOW_HEARD="1"
+        VOICE_CONF="$HOME/.config/voice-assistant/voice.conf"
+        if [[ -f "$VOICE_CONF" ]]; then
+            cfg_show=$(grep -E '^[[:space:]]*SHOW_HEARD[[:space:]]*=' "$VOICE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
+            [[ -n "${cfg_show:-}" ]] && SHOW_HEARD="$cfg_show"
+        fi
+        if [[ "$SHOW_HEARD" != "0" && "$SHOW_HEARD" != "false" && "$SHOW_HEARD" != "no" && "$SHOW_HEARD" != "off" ]]; then
+            notify-send -t 1200 "Ruby" "Heard: $TEXT" 2>/dev/null || true
+        fi
         exec ~/.local/bin/local-voice-exec "$TEXT"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true

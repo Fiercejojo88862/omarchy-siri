@@ -20,7 +20,7 @@ done
 # --- 1. Scripts -----------------------------------------------------------------
 mkdir -p "$BIN"
 for f in local-voice local-voice-exec local-voice-tts local-voice-say \
-         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon ruby-engine ruby-visual; do
+         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon ruby-engine ruby-visual local-voice-wake; do
     ln -sf "$REPO/bin/$f" "$BIN/$f"
     chmod +x "$REPO/bin/$f"
 done
@@ -59,11 +59,11 @@ info "Piper voices present."
 
 # --- 5. Config templates (never overwrite yours) --------------------------------------
 mkdir -p "$CONF"
-for f in calendar persona weather translate cloud voice; do
+for f in calendar persona weather translate cloud voice wake; do
     [[ -f "$CONF/$f.conf" ]] || cp "$REPO/config/$f.conf.example" "$CONF/$f.conf"
 done
 chmod 600 "$CONF"/*.conf 2>/dev/null || true
-info "Config templates in $CONF (calendar, persona, weather, translation, cloud, voice)."
+info "Config templates in $CONF (calendar, persona, weather, translation, cloud, voice, wake)."
 
 # --- 6. Desktop entries + icons ---------------------------------------------------
 mkdir -p "$HOME/.local/share/applications"
