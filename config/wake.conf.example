@@ -13,3 +13,7 @@ WAKE_COMMAND_SECONDS=6
 
 # Chunk length (seconds) for wake detection scans (2-4 recommended).
 WAKE_CHUNK_SECONDS=2.5
+
+# Optional: whisper model for wake/chunk detection (default: fast model like base.en).
+# Command captured after "Yes?" uses WHISPER_MODEL from voice.conf when set.
+WAKE_WHISPER_MODEL=

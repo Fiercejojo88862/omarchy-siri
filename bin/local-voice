@@ -17,9 +17,40 @@ chmod 700 "$RUN"
 
 PIDFILE="$RUN/record.pid"
 AUDIOFILE="$RUN/command.wav"
-MODEL="$HOME/.local/share/whisper-models/ggml-base.en.bin"
 LOCK="$RUN/record.lock"
 LOG="$RUN/voice.log"
+VOICE_CONF="$HOME/.config/voice-assistant/voice.conf"
+
+# Pick STT model: voice.conf WHISPER_MODEL, else best available.
+MODEL=""
+WHISPER_LANG="en"
+WHISPER_THREADS="8"
+WHISPER_PROMPT="Ruby, Hey Ruby. open close launch search weather calendar timer reminder volume brightness screenshot scroll click type workspace window Firefox Dolphin Kitty terminal browser."
+WHISPER_EXTRA=""
+if [[ -f "$VOICE_CONF" ]]; then
+    _vcfg() { grep -E "^[[:space:]]*($1)[[:space:]]*=" "$VOICE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//' || true; }
+    cfg_model="$(_vcfg 'WHISPER_MODEL|STT_MODEL|VOICE_WHISPER_MODEL')"
+    cfg_lang="$(_vcfg 'WHISPER_LANG|STT_LANG')"
+    cfg_threads="$(_vcfg 'WHISPER_THREADS|STT_THREADS')"
+    cfg_prompt="$(_vcfg 'WHISPER_PROMPT|STT_PROMPT')"
+    cfg_extra="$(_vcfg 'WHISPER_EXTRA_ARGS|STT_EXTRA_ARGS')"
+    [[ -n "${cfg_model:-}" ]] && MODEL="${cfg_model/#\~/$HOME}"
+    [[ -n "${cfg_lang:-}" ]] && WHISPER_LANG="$cfg_lang"
+    [[ -n "${cfg_threads:-}" ]] && WHISPER_THREADS="$cfg_threads"
+    [[ -n "${cfg_prompt:-}" ]] && WHISPER_PROMPT="$cfg_prompt"
+    [[ -n "${cfg_extra:-}" ]] && WHISPER_EXTRA="$cfg_extra"
+fi
+if [[ -z "$MODEL" || ! -f "$MODEL" ]]; then
+    for cand in \
+        "$HOME/.local/share/voxtype/models/ggml-large-v3-turbo.bin" \
+        "$HOME/.local/share/whisper-models/ggml-large-v3-turbo.bin" \
+        "$HOME/.local/share/whisper-models/ggml-small.en.bin" \
+        "$HOME/.local/share/whisper-models/ggml-base.en.bin" \
+        "$HOME/.local/share/voxtype/models/ggml-base.en.bin"; do
+        [[ -f "$cand" ]] && MODEL="$cand" && break
+    done
+fi
+[[ -z "$MODEL" ]] && MODEL="$HOME/.local/share/whisper-models/ggml-base.en.bin"
 # NOTE: every backgrounded process below redirects stdin from /dev/null and
 # stdout/stderr to $LOG. Hyprland's exec_cmd waits for the dispatched child's
 # pipes; a background child inheriting them keeps the dispatch "running" and
@@ -111,9 +142,29 @@ stop_recording() {
     # open by whisper/ollama inheriting Hyprland's pipes.
     (
         # whisper hygiene: collapse newlines, trim, drop trailing punctuation
-        # so "Dolphin." -> "Dolphin" and bare nouns survive to the fallback.
-        TEXT=$(whisper-cli -m "$MODEL" -f "$AUDIOFILE" -t 8 --no-timestamps -nt 2>/dev/null | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[.?!,;:]*$//')
+        # and common hallucination tokens so routing sees clean commands.
+        wargs=(-m "$MODEL" -f "$AUDIOFILE" -t "$WHISPER_THREADS" -l "$WHISPER_LANG" --no-timestamps -nt -sns)
+        [[ -n "${WHISPER_PROMPT:-}" ]] && wargs+=(--prompt "$WHISPER_PROMPT")
+        if [[ -n "${WHISPER_EXTRA:-}" ]]; then
+            # shellcheck disable=SC2206
+            extra_arr=($WHISPER_EXTRA)
+            wargs+=("${extra_arr[@]}")
+        fi
+        TEXT=$(whisper-cli "${wargs[@]}" 2>/dev/null \
+            | tr '\n' ' ' \
+            | sed -E 's/\[[^]]*\]//g; s/\([^)]*\)//g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/[.?!,;:]+$//' \
+            | tr -s ' ')
         rm -f "$AUDIOFILE"
+        TEXT=$(printf '%s' "$TEXT" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+        lc_text="$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]')"
+        case "$lc_text" in
+            ""|"thanks for watching"*|"subtitles by"*|"thank you for watching"*|"please subscribe"*|"[music]"|"[silence]"|"[blank_audio]"|"(music)"|"(silence)")
+                # Common whisper hallucinations on near-silence/noise.
+                TEXT=""
+                ;;
+        esac
+        # Strip residual bracketed/parenthesized tokens that may remain.
+        TEXT=$(printf '%s' "$TEXT" | sed -E 's/\[[^]]*\]//g; s/\([^)]*\)//g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[.?!,;:]+$//' | tr -s ' ')
         if [[ -z "$TEXT" ]]; then
             # No speech heard — music may be playing instead. Fall through to
             # Shazam automatically (records its own fresh sample in exec).
@@ -123,7 +174,6 @@ stop_recording() {
         fi
         # Show what was heard for quick feedback/debugging, then dispatch.
         SHOW_HEARD="1"
-        VOICE_CONF="$HOME/.config/voice-assistant/voice.conf"
         if [[ -f "$VOICE_CONF" ]]; then
             cfg_show=$(grep -E '^[[:space:]]*SHOW_HEARD[[:space:]]*=' "$VOICE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
             [[ -n "${cfg_show:-}" ]] && SHOW_HEARD="$cfg_show"

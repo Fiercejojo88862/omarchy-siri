@@ -24,3 +24,20 @@ SHOW_HEARD=1
 
 # Optional custom phrase for "Test voice" / sample playback.
 SAMPLE_TEXT=
+
+# --- Speech recognition (whisper-cli) ---
+# WHISPER_MODEL: path to ggml model. Empty = auto-detect best available
+# (prefers large-v3-turbo > small.en > base.en for better accuracy).
+WHISPER_MODEL=
+
+# WHISPER_LANG: spoken language code (default: en).
+WHISPER_LANG=en
+
+# WHISPER_THREADS: CPU threads for transcription (default: 8 for PTT).
+WHISPER_THREADS=8
+
+# WHISPER_PROMPT: optional bias prompt (helps recognize names/commands).
+WHISPER_PROMPT=
+
+# WHISPER_EXTRA_ARGS: extra whisper-cli flags (advanced).
+WHISPER_EXTRA_ARGS=

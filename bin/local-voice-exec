@@ -20,6 +20,35 @@ prompt = sys.argv[1].strip()
 if not prompt:
     sys.exit(0)
 
+# Clean common STT artifacts and mishearings to improve command recognition.
+_STT_FIXES = [
+    (r"\[[^\]]*\]", " "),
+    (r"\([^\)]*\)", " "),
+    (r"\bhey[, ]+rubi\b", "hey Ruby"),
+    (r"\bhey[, ]+rubie\b", "hey Ruby"),
+    (r"\bhey[, ]+rubey\b", "hey Ruby"),
+    (r"\bhi[, ]+rubi\b", "hi Ruby"),
+    (r"\bhello[, ]+rubi\b", "hello Ruby"),
+    (r"\bokay[, ]+rubi\b", "okay Ruby"),
+    (r"\bok[, ]+rubi\b", "ok Ruby"),
+    (r"\brubi[, ]+", "Ruby, "),
+    (r"\brubie\b", "Ruby"),
+    (r"\brubey\b", "Ruby"),
+    (r"\brooby\b", "Ruby"),
+    (r"\bfire\s+fox\b", "Firefox"),
+    (r"\bfile\s+fox\b", "Firefox"),
+    (r"\bdolfin\b", "Dolphin"),
+    (r"\bdolphine\b", "Dolphin"),
+    (r"\bkey\s*tty\b", "kitty"),
+    (r"\bkit\s*ty\b", "kitty"),
+    (r"\bwhether\b(?=\s+(in|today|tomorrow|like|outside|now|for)\b)", "weather"),
+    (r"\bblue\s*tooth\b", "bluetooth"),
+    (r"\bblue\s+teeth\b", "bluetooth"),
+]
+for _pat, _rep in _STT_FIXES:
+    prompt = re.sub(_pat, _rep, prompt, flags=re.IGNORECASE)
+prompt = re.sub(r"\s+", " ", prompt).strip().strip(" ,.-")
+
 # Runtime scratch in the private per-user tmpfs (dir 0700, files 0600 from the
 # callers' umask), cleared at logout. Recordings, Shazam samples and debug logs
 # must never sit in a shared /tmp.

@@ -18,28 +18,79 @@ LOG="$RUN/wake.log"
 CHUNK="$RUN/wake_chunk.wav"
 CMDWAV="$RUN/wake_cmd.wav"
 PTT_PID="$RUN/record.pid"
-MODEL="$HOME/.local/share/whisper-models/ggml-base.en.bin"
+VOICE_CONF="$HOME/.config/voice-assistant/voice.conf"
 
 ASSISTANT_NAME="Ruby"
 WAKE_PHRASES=""
 WAKE_COMMAND_SECONDS="6"
 WAKE_CHUNK_SECONDS="2.5"
+WAKE_WHISPER_MODEL=""
+WHISPER_MODEL=""
+WHISPER_LANG="en"
+WHISPER_THREADS="4"
+WHISPER_PROMPT="Ruby, Hey Ruby. open close launch search weather calendar timer reminder volume brightness screenshot scroll click type workspace window."
 if [[ -f "$HOME/.config/voice-assistant/persona.conf" ]]; then
     cfg_name=$(grep -E '^[[:space:]]*ASSISTANT_NAME[[:space:]]*=' "$HOME/.config/voice-assistant/persona.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     [[ -n "${cfg_name:-}" ]] && ASSISTANT_NAME="$cfg_name"
+fi
+if [[ -f "$VOICE_CONF" ]]; then
+    _vcfg() { grep -E "^[[:space:]]*($1)[[:space:]]*=" "$VOICE_CONF" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//' || true; }
+    cfg_model="$(_vcfg 'WHISPER_MODEL|STT_MODEL|VOICE_WHISPER_MODEL')"
+    cfg_lang="$(_vcfg 'WHISPER_LANG|STT_LANG')"
+    cfg_threads="$(_vcfg 'WHISPER_THREADS|STT_THREADS')"
+    cfg_prompt="$(_vcfg 'WHISPER_PROMPT|STT_PROMPT')"
+    [[ -n "${cfg_model:-}" ]] && WHISPER_MODEL="${cfg_model/#\~/$HOME}"
+    [[ -n "${cfg_lang:-}" ]] && WHISPER_LANG="$cfg_lang"
+    [[ -n "${cfg_threads:-}" ]] && WHISPER_THREADS="$cfg_threads"
+    [[ -n "${cfg_prompt:-}" ]] && WHISPER_PROMPT="$cfg_prompt"
 fi
 if [[ -f "$HOME/.config/voice-assistant/wake.conf" ]]; then
     cfg_phrases=$(grep -E '^[[:space:]]*WAKE_PHRASES[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     cfg_cmd=$(grep -E '^[[:space:]]*WAKE_COMMAND_SECONDS[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     cfg_chunk=$(grep -E '^[[:space:]]*WAKE_CHUNK_SECONDS[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
+    cfg_wmodel=$(grep -E '^[[:space:]]*(WAKE_WHISPER_MODEL|WHISPER_MODEL)[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     [[ -n "${cfg_phrases:-}" ]] && WAKE_PHRASES="$cfg_phrases"
     [[ -n "${cfg_cmd:-}" ]] && WAKE_COMMAND_SECONDS="$cfg_cmd"
     [[ -n "${cfg_chunk:-}" ]] && WAKE_CHUNK_SECONDS="$cfg_chunk"
+    [[ -n "${cfg_wmodel:-}" ]] && WAKE_WHISPER_MODEL="${cfg_wmodel/#\~/$HOME}"
 fi
+
+pick_fast_model() {
+    for cand in \
+        "$HOME/.local/share/whisper-models/ggml-small.en.bin" \
+        "$HOME/.local/share/whisper-models/ggml-base.en.bin" \
+        "$HOME/.local/share/voxtype/models/ggml-base.en.bin" \
+        "$HOME/.local/share/voxtype/models/ggml-large-v3-turbo.bin"; do
+        [[ -f "$cand" ]] && echo "$cand" && return 0
+    done
+    echo "$HOME/.local/share/whisper-models/ggml-base.en.bin"
+}
+
+pick_best_model() {
+    for cand in \
+        "$HOME/.local/share/voxtype/models/ggml-large-v3-turbo.bin" \
+        "$HOME/.local/share/whisper-models/ggml-large-v3-turbo.bin" \
+        "$HOME/.local/share/whisper-models/ggml-small.en.bin" \
+        "$HOME/.local/share/whisper-models/ggml-base.en.bin" \
+        "$HOME/.local/share/voxtype/models/ggml-base.en.bin"; do
+        [[ -f "$cand" ]] && echo "$cand" && return 0
+    done
+    echo "$HOME/.local/share/whisper-models/ggml-base.en.bin"
+}
+
+MODEL="$WAKE_WHISPER_MODEL"
+[[ -z "$MODEL" || ! -f "$MODEL" ]] && MODEL="$(pick_fast_model)"
+CMD_MODEL="$WHISPER_MODEL"
+[[ -z "$CMD_MODEL" || ! -f "$CMD_MODEL" ]] && CMD_MODEL="$(pick_best_model)"
 
 name_lc=$(printf '%s' "$ASSISTANT_NAME" | tr '[:upper:]' '[:lower:]')
 if [[ -z "${WAKE_PHRASES}" ]]; then
-    WAKE_PHRASES="hey ${name_lc},hi ${name_lc},hello ${name_lc},ok ${name_lc},okay ${name_lc}"
+    WAKE_PHRASES="hey ${name_lc},hi ${name_lc},hello ${name_lc},ok ${name_lc},okay ${name_lc},${name_lc}"
+fi
+# Accept common mishearings of the name in wake detection.
+_name_re="$name_lc"
+if [[ "$name_lc" == "ruby" ]]; then
+    _name_re='ruby|rubi|rubie|rubey|rooby'
 fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not installed" >&2; exit 1; }; }
@@ -55,28 +106,43 @@ record_for() {
 }
 
 transcribe() {
-    local wav="$1"
+    local wav="$1" model="${2:-$MODEL}" threads="${3:-$WHISPER_THREADS}"
     [[ -f "$wav" ]] || { echo ""; return 0; }
     local sz
     sz=$(stat -c%s "$wav" 2>/dev/null || echo 0)
     [[ "$sz" -lt 1200 ]] && { echo ""; return 0; }
-    whisper-cli -m "$MODEL" -f "$wav" -t 4 --no-timestamps -nt 2>/dev/null \
-        | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[.?!,;:]*$//'
+    local wargs=(-m "$model" -f "$wav" -t "$threads" -l "$WHISPER_LANG" --no-timestamps -nt -sns)
+    [[ -n "${WHISPER_PROMPT:-}" ]] && wargs+=(--prompt "$WHISPER_PROMPT")
+    local text
+    text=$(whisper-cli "${wargs[@]}" 2>/dev/null \
+        | tr '\n' ' ' \
+        | sed -E 's/\[[^]]*\]//g; s/\([^)]*\)//g; s/^[[:space:]]*//; s/[[:space:]]*$//; s/[.?!,;:]+$//' \
+        | tr -s ' ')
+    case "$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')" in
+        ""|"thanks for watching"*|"subtitles by"*|"thank you for watching"*|"please subscribe"*)
+            echo ""; return 0 ;;
+    esac
+    echo "$text"
 }
 
 normalize() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+normalize_punct() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E "s/[^a-z0-9[:space:]']//g; s/[[:space:]]+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//"
+}
+
 extract_command() {
     # args: normalized text, original text
     local norm="$1" orig="$2"
+    local normp
+    normp=$(normalize_punct "$orig")
     IFS=',' read -ra phrases <<< "$WAKE_PHRASES"
     for p in "${phrases[@]}"; do
         p=$(printf '%s' "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
         [[ -z "$p" ]] && continue
-        if [[ "$norm" == "$p"* ]]; then
-            # Try to cut from original by word count of phrase.
+        if [[ "$norm" == "$p"* || "$normp" == "$p"* ]]; then
             local wc
             wc=$(echo "$p" | wc -w)
             local rest
@@ -86,20 +152,27 @@ extract_command() {
             return 0
         fi
     done
-    # fallback: strip leading "hey/hi/hello/ok <name>"
-    echo "$orig" | sed -E "s/^[[:space:]]*((hey|hi|hello|ok|okay)[[:space:]]+${name_lc})[,[:space:]]*//I" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    # fallback: strip leading "hey/hi/hello/ok <name-or-variant>"
+    echo "$orig" | sed -E "s/^[[:space:]]*((hey|hi|hello|ok|okay|a)[,[:space:]]+(${_name_re}))[,[:space:]]*//I; s/^[[:space:]]*(${_name_re})[,[:space:]]*//I" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 wake_detected() {
     local norm="$1"
+    local normp
+    normp=$(normalize_punct "$norm")
     IFS=',' read -ra phrases <<< "$WAKE_PHRASES"
     for p in "${phrases[@]}"; do
         p=$(printf '%s' "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
         [[ -z "$p" ]] && continue
-        [[ "$norm" == "$p"* || "$norm" == *" $p"* || "$norm" == *"$p"* ]] && return 0
+        [[ "$norm" == "$p"* || "$norm" == *" $p"* || "$norm" == *"$p"* || "$normp" == "$p"* || "$normp" == *" $p"* ]] && return 0
     done
-    # also accept bare assistant name at start in some forms
-    [[ "$norm" == "${name_lc}"* ]] && return 0
+    # fuzzy name/phrase forms: "hey ruby", "a ruby", mishearings
+    if echo "$normp" | grep -Eq "(^|[[:space:]])(hey|hi|hello|ok|okay|a)[[:space:]]+(${_name_re})([[:space:]]|$)"; then
+        return 0
+    fi
+    if echo "$normp" | grep -Eq "^(${_name_re})([[:space:]]|$)"; then
+        return 0
+    fi
     return 1
 }
 
@@ -127,26 +200,36 @@ run_loop() {
         fi
         record_for "$WAKE_CHUNK_SECONDS" "$CHUNK"
         [[ -f "$STOPFILE" ]] && break
-        text=$(transcribe "$CHUNK")
-        rm -f "$CHUNK"
-        [[ -z "$text" ]] && continue
+        text=$(transcribe "$CHUNK" "$MODEL")
+        [[ -z "$text" ]] && { rm -f "$CHUNK"; continue; }
         norm=$(normalize "$text")
         if wake_detected "$norm"; then
             cmd=$(extract_command "$norm" "$text")
             # If command included in same utterance, run it.
             if [[ -n "${cmd// }" ]]; then
+                # Re-transcribe with better model for command accuracy when available.
+                if [[ "$CMD_MODEL" != "$MODEL" ]]; then
+                    text2=$(transcribe "$CHUNK" "$CMD_MODEL" "${WHISPER_THREADS:-4}")
+                    if [[ -n "$text2" ]]; then
+                        norm2=$(normalize "$text2")
+                        cmd2=$(extract_command "$norm2" "$text2")
+                        [[ -n "${cmd2// }" ]] && cmd="$cmd2"
+                    fi
+                fi
+                rm -f "$CHUNK"
                 notify-send -t 1000 "Ruby" "Heard: $cmd" 2>/dev/null || true
                 ~/.local/bin/local-voice-exec "$cmd" </dev/null >>"$LOG" 2>&1 || true
                 sleep 0.3
                 continue
             fi
+            rm -f "$CHUNK"
             # Wake only: prompt and listen for command.
             printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
             notify-send -t 1200 "Ruby" "Yes?" 2>/dev/null || true
             ~/.local/bin/local-voice-say "Yes?" </dev/null >/dev/null 2>&1 &
             record_for "$WAKE_COMMAND_SECONDS" "$CMDWAV"
             printf '%s' "thinking" > "$RUN/ruby_state" 2>/dev/null || true
-            cmd=$(transcribe "$CMDWAV")
+            cmd=$(transcribe "$CMDWAV" "$CMD_MODEL" "${WHISPER_THREADS:-4}")
             rm -f "$CMDWAV"
             if [[ -n "${cmd// }" ]]; then
                 notify-send -t 1200 "Ruby" "Heard: $cmd" 2>/dev/null || true
@@ -155,6 +238,8 @@ run_loop() {
                 printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
             fi
             sleep 0.3
+        else
+            rm -f "$CHUNK"
         fi
     done
     rm -f "$PIDFILE" "$STOPFILE" "$CHUNK" "$CMDWAV"
