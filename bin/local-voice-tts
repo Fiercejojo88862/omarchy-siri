@@ -46,7 +46,7 @@ fi
 
 # Small pre-playback delay so speech doesn't start on top of notification
 # sounds or feel clipped at the beginning. Tune with VOICE_SPEAK_DELAY (seconds).
-speak_delay="${VOICE_SPEAK_DELAY:-0.25}"
+speak_delay="${VOICE_SPEAK_DELAY:-0.15}"
 
 # Detached playback: a player inheriting a dispatch pipe keeps the caller
 # waiting and risks SIGTTIN — detached fds play and vanish.

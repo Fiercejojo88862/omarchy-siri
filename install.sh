@@ -59,11 +59,11 @@ info "Piper voices present."
 
 # --- 5. Config templates (never overwrite yours) --------------------------------------
 mkdir -p "$CONF"
-for f in calendar persona weather translate; do
+for f in calendar persona weather translate cloud; do
     [[ -f "$CONF/$f.conf" ]] || cp "$REPO/config/$f.conf.example" "$CONF/$f.conf"
 done
 chmod 600 "$CONF"/*.conf 2>/dev/null || true
-info "Config templates in $CONF (calendar links, persona, optional AccuWeather key)."
+info "Config templates in $CONF (calendar, persona, weather, translation, cloud brain)."
 
 # --- 6. Apple Calendar desktop entry ---------------------------------------------------
 DESKTOP="$HOME/.local/share/applications/apple-calendar.desktop"

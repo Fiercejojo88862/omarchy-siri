@@ -1,0 +1,30 @@
+# Cloud brain — copy to ~/.config/voice-assistant/cloud.conf (chmod 600)
+#
+# Optional. When enabled, open-ended questions (ones no local skill handles)
+# are answered by a fast cloud model via any OpenAI-compatible API. On quota,
+# rate-limit, or error she falls back to the local Ollama model.
+#
+# CLOUD_ENABLED: 0 = off (default), 1 = on
+CLOUD_ENABLED=0
+
+# CLOUD_PROVIDER: hint only (groq, cerebras, openrouter, openai, custom)
+CLOUD_PROVIDER=groq
+
+# CLOUD_API_KEY: your provider key. Keep this file chmod 600.
+CLOUD_API_KEY=
+
+# CLOUD_BASE_URL: OpenAI-compatible chat completions base URL.
+# Groq:      https://api.groq.com/openai/v1
+# Cerebras:  https://api.cerebras.ai/v1
+# OpenRouter:https://openrouter.ai/api/v1
+CLOUD_BASE_URL=https://api.groq.com/openai/v1
+
+# CLOUD_MODEL: fast model name on your provider (e.g. llama-3.1-8b-instant)
+CLOUD_MODEL=llama-3.1-8b-instant
+
+# CLOUD_DAILY_CAP: max cloud requests per day (0 = unlimited). Default 50.
+CLOUD_DAILY_CAP=50
+
+# CLOUD_LIMIT_COOLDOWN: seconds before repeating the "reached your generation
+# limit" message when over cap/rate-limited. Default 3600 (1 hour).
+CLOUD_LIMIT_COOLDOWN=3600

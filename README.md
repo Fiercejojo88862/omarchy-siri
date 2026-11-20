@@ -8,11 +8,12 @@ Offline push-to-talk voice assistant for Hyprland (Omarchy/Arch). Press **INS** 
 
 ```text
 INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
-       ──▶ Ollama qwen2.5:3b (intent → JSON) ──▶ hyprctl dispatch (Lua) / apps
-       ──▶ popup + Piper southern-English female speaks the confirmation
+       ──▶ deterministic skills / Ollama qwen2.5:3b (intent + answers)
+       ──▶ hyprctl dispatch (Lua) / apps / spoken answer
+       ──▶ popup + Piper southern-English female speaks the response
 ```
 
-100% local, 100% offline. No audio leaves the machine.
+Local-first and offline-capable. Core control, STT, TTS, translation, and Q&A run locally by default. Optional network features are used only when needed/enabled: weather/calendar/Canvas/Shazam as before, quick web lookups for “search … and summarize/tell me”, and an optional **cloud brain** (off by default, your API key) for faster open-ended answers with local fallback. No audio leaves the machine.
 
 ## 📦 What's included
 
@@ -25,7 +26,7 @@ INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
 * `bin/local-voice-translate` — offline translation (local Ollama by default; LibreTranslate or argos opt-in)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
 * `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
-* `config/*.example` — calendar, weather, translation, and persona templates (`ASSISTANT_NAME`, default Ruby, sets the name she uses in self-intro and answers to)
+* `config/*.example` — calendar, weather, translation, cloud, and persona templates (`ASSISTANT_NAME`, default Ruby)
 
 ## 🚀 Install
 
@@ -67,11 +68,18 @@ Siri speaks with Piper `en_GB-southern_english_female-low` — stock British fem
 
 Copy `config/calendar.conf.example` to `~/.config/voice-assistant/calendar.conf` (`chmod 600`) and add iCloud public share links (`ICS_URL_HOME`/`ICS_URL_WORK`). Ask *"what's on my calendar"*, *"work calendar"*, *"when is my next appointment"*. Bearer URLs stay on disk only.
 
+## 🧠 AI answers & web
+
+* **Questions:** ask anything (“what is photosynthesis?”, “who was Ada Lovelace?”) — Ruby answers in a short spoken response. By default this uses local Ollama (`qwen2.5:3b`); if you enable the **cloud brain**, she tries your OpenAI-compatible provider first (fast) and falls back to local on error/quota.
+* **Web:** “search the web for X” opens DuckDuckGo results in your browser. “search the web for X and tell me / summarize” fetches quick web context and speaks a summary.
+* **Cloud brain (optional, off by default):** configure `~/.config/voice-assistant/cloud.conf` (chmod 600) with your key/endpoint/model. Voice controls: “cloud brain on/off”, “how many cloud requests today”. Daily cap + cooldown; over limit she says “You've reached your generation limit.” once per cooldown and answers locally.
+* **Speed tuning:** `VOICE_STOP_GRACE` (default 0.3s, capture tail of speech before stop) and `VOICE_SPEAK_DELAY` (default 0.15s, pause before playback) — set in your environment to trade latency vs cut-off/overlap.
+
 ## 🔒 Privacy
 
-`.gitignore` blocks recordings, models, `calendar.conf`, caches, tokens, and state. The router refuses shell/file-destructive output; shutdown/reboot/logout ask for a spoken `yes` first.
+`.gitignore` blocks recordings, models, `calendar.conf`, `cloud.conf`, caches, tokens, and state. The router refuses shell/file-destructive output; shutdown/reboot/logout ask for a spoken `yes` first.
 
-Translation is local: "how do you say good morning in Spanish" runs through your own model (`translate.conf`), never Google Translate. Only weather (wttr.in/AccuWeather), your iCloud calendar feed, Canvas and Shazam's fingerprint touch the network — and you can see all of that in `local-voice-exec --doctor`.
+Translation is local (`translate.conf`), never Google Translate. Network use is explicit: weather/calendar/Canvas/Shazam as configured, web lookups when you ask to search-and-summarize, and cloud Q&A only when `CLOUD_ENABLED=1` with your key. No audio leaves the machine. (`local-voice-exec --doctor` is planned.)
 
 ## 🧪 Tests
 

@@ -218,7 +218,7 @@ SPEAK	Sorry, no local translator answered that.
 HANDLER	translate
 
 ## search the web for llamas
-URL	https://duckduckgo.com/?q=llamas
+URL	https://www.bing.com/search?q=llamas
 POPUP	Ruby	I opened results for llamas.
 SPEAK	I opened results for llamas.
 HANDLER	web

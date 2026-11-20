@@ -111,7 +111,7 @@ def init_config() -> int:
     persona or API key.
     """
     wrote, kept = [], []
-    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf"):
+    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf"):
         dst = CONFIG_DIR / name
         if dst.exists():
             kept.append(name)
@@ -2156,25 +2156,101 @@ def _handle_spell(norm: str) -> bool:
     return True
 
 
-def _open_url(url: str) -> bool:
+_BROWSER_CLASS_CMDS = (
+    ("firefox", ("firefox",)),
+    ("librewolf", ("librewolf",)),
+    ("zen", ("zen-browser", "zen")),
+    ("brave", ("brave", "brave-browser")),
+    ("chromium", ("chromium", "chromium-browser")),
+    ("google-chrome", ("google-chrome-stable", "google-chrome")),
+    ("chrome", ("google-chrome-stable", "google-chrome", "chromium")),
+    ("microsoft-edge", ("microsoft-edge-stable", "microsoft-edge")),
+    ("vivaldi", ("vivaldi-stable", "vivaldi")),
+)
+
+
+def _active_workspace_id() -> int | None:
+    try:
+        r = subprocess.run(["hyprctl", "-j", "activeworkspace"], capture_output=True,
+                           text=True, timeout=3)
+        if r.returncode == 0:
+            data = json.loads(r.stdout or "{}")
+            if isinstance(data, dict) and "id" in data:
+                return int(data["id"])
+    except Exception:
+        pass
+    return None
+
+
+def _browser_on_current_workspace() -> str | None:
+    """Return a browser binary to reuse on the active workspace, or None."""
+    ws = _active_workspace_id()
+    if ws is None:
+        return None
+    try:
+        clients = _hypr_clients()
+    except Exception:
+        return None
+    for c in clients:
+        if c.get("hidden"):
+            continue
+        try:
+            cws = (c.get("workspace") or {}).get("id")
+            if cws is None or int(cws) != ws:
+                continue
+        except Exception:
+            continue
+        cls = " ".join([
+            str(c.get("class") or ""),
+            str(c.get("initialClass") or ""),
+            str(c.get("title") or ""),
+        ]).lower()
+        for needle, cmds in _BROWSER_CLASS_CMDS:
+            if needle in cls:
+                for cmd in cmds:
+                    if shutil.which(cmd):
+                        return cmd
+    return None
+
+
+def _open_url(url: str, *, prefer_current_workspace: bool = True) -> bool:
     if REHEARSAL:
         print(f"URL\t{url}")
         return True
-    if shutil.which("firefox"):
-        subprocess.Popen(["firefox", "--new-window", url], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-        return True
-    if shutil.which("chromium"):
-        subprocess.Popen(["chromium", "--new-window", url], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-        return True
+    if prefer_current_workspace:
+        browser = _browser_on_current_workspace()
+        if browser:
+            try:
+                # Reuse existing browser session/window (opens as a tab there).
+                subprocess.Popen([browser, url], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                return True
+            except Exception:
+                pass
+    for cmd, argv in (
+        ("firefox", ["firefox", "--new-window", url]),
+        ("chromium", ["chromium", "--new-window", url]),
+        ("google-chrome-stable", ["google-chrome-stable", "--new-window", url]),
+        ("google-chrome", ["google-chrome", "--new-window", url]),
+        ("brave", ["brave", "--new-window", url]),
+    ):
+        if shutil.which(cmd):
+            try:
+                subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                return True
+            except Exception:
+                pass
     if shutil.which("xdg-open"):
-        subprocess.Popen(["xdg-open", url], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-        return True
+        try:
+            subprocess.Popen(["xdg-open", url], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            return True
+        except Exception:
+            pass
     return False
 
 
@@ -2239,14 +2315,14 @@ def _handle_web(norm: str) -> bool:
         if _open_url("https://www.youtube.com"):
             _confirm("YouTube is open — I can't reach your playlists offline, Sir.")
             return True
-    # General web search: results on screen (can't read the web offline).
-    # The optional prefixes are non-capturing so the query itself is the only
-    # group that can match first ("search the web for llamas" used to search
-    # for the words "the web").
+    # General web search: open browser for quick lookup, unless the user asked
+    # to be told/summarized (that becomes an AI+web answer handled elsewhere).
     m = re.search(r"\bsearch (?:the web )?(?:for )?(.+)|google (.+)|look up (.+)|who won (.+)|define (\w+)\b", norm)
     if m:
+        if _WANTS_SUMMARY.search(norm):
+            return False
         q = next((g for g in m.groups() if g), "").strip()[:160]
-        if _open_url(f"https://duckduckgo.com/?q={quote_plus(q)}"):
+        if _open_url(f"https://www.bing.com/search?q={quote_plus(q)}"):
             _confirm(f"I opened results for {q[:60]}.")
             return True
         _confirm("Sorry, no browser to open that with.")
@@ -3039,6 +3115,338 @@ def _handle_moods(norm: str) -> bool:
     return False
 
 
+# --- cloud brain + AI answers (open-ended questions, web summary) -------------
+CLOUD_CONF = CONFIG_DIR / "cloud.conf"
+CLOUD_USAGE_FILE = STATE_DIR / "cloud_usage.json"
+CLOUD_LIMIT_FILE = STATE_DIR / "cloud_limit_notice"
+
+
+def _cloud_conf() -> dict:
+    conf = {
+        "enabled": False,
+        "provider": "groq",
+        "key": "",
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.1-8b-instant",
+        "daily_cap": 50,
+        "cooldown": 3600,
+    }
+    try:
+        for line in CLOUD_CONF.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip().upper(), v.strip().strip("'\"")
+            if k == "CLOUD_ENABLED":
+                conf["enabled"] = v.lower() in ("1", "true", "yes", "on")
+            elif k == "CLOUD_PROVIDER":
+                conf["provider"] = v.lower() or conf["provider"]
+            elif k == "CLOUD_API_KEY":
+                conf["key"] = v
+            elif k == "CLOUD_BASE_URL":
+                conf["base_url"] = v.rstrip("/") or conf["base_url"]
+            elif k == "CLOUD_MODEL":
+                conf["model"] = v or conf["model"]
+            elif k == "CLOUD_DAILY_CAP":
+                try:
+                    conf["daily_cap"] = max(0, int(float(v)))
+                except ValueError:
+                    pass
+            elif k == "CLOUD_LIMIT_COOLDOWN":
+                try:
+                    conf["cooldown"] = max(60, int(float(v)))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return conf
+
+
+def _cloud_usage_today() -> tuple[str, int]:
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        data = json.loads(CLOUD_USAGE_FILE.read_text())
+        if isinstance(data, dict) and data.get("date") == today:
+            return today, int(data.get("count", 0))
+    except (OSError, ValueError, TypeError):
+        pass
+    return today, 0
+
+
+def _cloud_usage_inc() -> int:
+    today, count = _cloud_usage_today()
+    count += 1
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        CLOUD_USAGE_FILE.write_text(json.dumps({"date": today, "count": count}))
+    except OSError:
+        pass
+    return count
+
+
+def _cloud_set_enabled(enabled: bool) -> None:
+    try:
+        text = CLOUD_CONF.read_text() if CLOUD_CONF.exists() else ""
+    except OSError:
+        text = ""
+    if re.search(r"(?m)^CLOUD_ENABLED=", text):
+        text = re.sub(r"(?m)^CLOUD_ENABLED=.*$", f"CLOUD_ENABLED={'1' if enabled else '0'}", text)
+    else:
+        text = (text.rstrip() + "\n" if text.strip() else "") + f"CLOUD_ENABLED={'1' if enabled else '0'}\n"
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CLOUD_CONF.write_text(text)
+        CLOUD_CONF.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _cloud_limit_notice_ok(cooldown: int) -> bool:
+    try:
+        last = float(CLOUD_LIMIT_FILE.read_text().strip())
+        if time.time() - last < cooldown:
+            return False
+    except (OSError, ValueError):
+        pass
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        CLOUD_LIMIT_FILE.write_text(str(time.time()))
+    except OSError:
+        pass
+    return True
+
+
+def _cloud_chat(messages: list[dict], *, max_tokens: int = 180, timeout: float = 12.0) -> str | None:
+    """OpenAI-compatible chat completion. Returns text or None on failure/limit."""
+    if REHEARSAL:
+        return None
+    conf = _cloud_conf()
+    if not conf["enabled"] or not conf["key"]:
+        return None
+    today, count = _cloud_usage_today()
+    if conf["daily_cap"] and count >= conf["daily_cap"]:
+        if _cloud_limit_notice_ok(conf["cooldown"]):
+            _speak("You've reached your generation limit.")
+        return None
+    url = conf["base_url"].rstrip("/") + "/chat/completions"
+    payload = json.dumps({
+        "model": conf["model"],
+        "messages": messages,
+        "temperature": 0.4,
+        "max_tokens": max_tokens,
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {conf['key']}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        if text:
+            _cloud_usage_inc()
+            return text
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 402):
+            if _cloud_limit_notice_ok(conf["cooldown"]):
+                _speak("You've reached your generation limit.")
+        return None
+    except Exception:
+        return None
+    return None
+
+
+def _ollama_chat(system: str, user: str, *, max_tokens: int = 180, timeout: float = 20.0) -> str | None:
+    """Fast local Q&A via Ollama (plain text, not intent JSON)."""
+    if REHEARSAL:
+        return None
+    payload = json.dumps({
+        "model": "qwen2.5:3b",
+        "keep_alive": "30m",
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "options": {"temperature": 0.4, "num_predict": max_tokens},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:11434/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return (data.get("message", {}).get("content") or "").strip() or None
+    except Exception:
+        return None
+
+
+_QA_SYSTEM = (
+    "You are {name}, a helpful voice assistant on the user's Linux desktop. "
+    "Answer clearly and accurately in 1-3 short sentences suitable for speech. "
+    "No markdown, no lists, no URLs, no code blocks. "
+    "If you don't know, say so briefly."
+)
+
+
+def _speakable_answer(text: str, limit: int = 420) -> str:
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"[*_#>]+", " ", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        cut = text.rfind(". ", 0, limit)
+        text = (text[:cut + 1] if cut > 80 else text[: limit - 1].rstrip() + "…")
+    return text
+
+
+def ask_ai(question: str, context: str = "") -> str | None:
+    """Answer an open-ended question: cloud first (if enabled), else local."""
+    sysmsg = _QA_SYSTEM.format(name=_NAME)
+    if context:
+        user = f"Context:\n{context[:1800]}\n\nQuestion: {question}"
+    else:
+        user = question
+    msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]
+    ans = _cloud_chat(msgs, max_tokens=180, timeout=10.0)
+    if not ans:
+        local_sys = sysmsg + (" Use the provided context." if context else "")
+        ans = _ollama_chat(local_sys, user, max_tokens=160, timeout=18.0)
+    return _speakable_answer(ans) if ans else None
+
+
+def _ddg_instant(query: str, timeout: float = 5.0) -> str:
+    """DuckDuckGo Instant Answer (no key). Returns abstract/answer text or ''."""
+    if REHEARSAL:
+        return ""
+    try:
+        from urllib.parse import quote_plus, unquote
+        url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "omarchy-siri/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        text = (data.get("AbstractText") or data.get("Answer") or "").strip()
+        if not text:
+            for t in (data.get("RelatedTopics") or [])[:3]:
+                if isinstance(t, dict) and t.get("Text"):
+                    text = (text + " " + str(t["Text"])).strip()
+        src = (data.get("AbstractURL") or "").strip()
+        if text and src:
+            text = f"{text} (source: {src})"
+        return _speakable_answer(text, 900)
+    except Exception:
+        return ""
+
+
+def _ddg_web_snippets(query: str, timeout: float = 6.0) -> str:
+    """Best-effort snippets from DuckDuckGo HTML results (no key)."""
+    if REHEARSAL:
+        return ""
+    try:
+        from urllib.parse import quote_plus
+        import html as _html
+        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) omarchy-siri/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            page = resp.read().decode("utf-8", "replace")
+        # Extract result snippets (result__snippet / result__a text)
+        bits = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', page, re.DOTALL)
+        if not bits:
+            bits = re.findall(r'class="result__snippet"[^>]*>(.*?)</(?:a|div|span)>', page, re.DOTALL)
+        clean = []
+        for b in bits[:4]:
+            t = re.sub(r"<[^>]+>", " ", b)
+            t = _html.unescape(re.sub(r"\s+", " ", t)).strip()
+            if len(t) > 40:
+                clean.append(t)
+        return _speakable_answer(" ".join(clean), 1200)
+    except Exception:
+        return ""
+
+
+def web_lookup(query: str) -> str:
+    """Gather quick web context for a question (instant answer + snippets)."""
+    parts = []
+    ia = _ddg_instant(query, timeout=4.0)
+    if ia:
+        parts.append(ia)
+    snip = _ddg_web_snippets(query, timeout=5.0)
+    if snip and snip[:60] not in (ia or ""):
+        parts.append(snip)
+    return "\n".join(parts)[:1800]
+
+
+_WANTS_SUMMARY = re.compile(
+    r"\b(and )?(tell me( about it)?|summari[sz]e( it)?|explain( it)?|what (does|do|is|are) (it|that|they) say|what'?s it about|give me (a )?(summary|overview|rundown))\b"
+)
+_QUESTION_LIKE = re.compile(
+    r"^(what|who|when|where|why|how|which|explain|define|tell me about|can you tell me|do you know)\b"
+    r"|(\bwhat is\b|\bwho is\b|\bwho was\b|\bhow does\b|\bhow do\b|\bwhy does\b|\bwhy do\b|\bmeaning of\b)"
+)
+
+
+def _handle_ai_question(norm: str, raw: str) -> bool:
+    """Answer open-ended questions (and web+summary requests) via AI."""
+    # Explicit "search/look up ... and tell me/summarize" -> web lookup + answer
+    m = re.search(r"\b(?:search (?:the web )?(?:for )?|google |look up )(.+)", norm)
+    wants_summary = bool(_WANTS_SUMMARY.search(norm))
+    if m and wants_summary:
+        q = re.sub(r"\b(and )?(tell me( about it)?|summari[sz]e( it)?|explain( it)?|what (does|do|is|are) (it|that|they) say|what'?s it about|give me (a )?(summary|overview|rundown)).*$", "", m.group(1)).strip(" ?.,")
+        q = q or raw.strip()
+        _popup(_NAME, f"Looking up: {q[:80]}", timeout_ms=4000)
+        context = web_lookup(q)
+        ans = ask_ai(q, context=context) or "I couldn't find a clear answer right now."
+        _touch_interaction()
+        _popup(_NAME, ans[:900], timeout_ms=12000)
+        _speak(_with_address(ans, is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+
+    # Cloud brain voice controls
+    if re.search(r"\bcloud brain on\b|\benable cloud\b|\bturn on cloud\b", norm):
+        _cloud_set_enabled(True)
+        _confirm("Cloud brain on.")
+        return True
+    if re.search(r"\bcloud brain off\b|\bdisable cloud\b|\bturn off cloud\b", norm):
+        _cloud_set_enabled(False)
+        _confirm("Cloud brain off.")
+        return True
+    if re.search(r"\bhow many cloud (requests|calls)|cloud (requests|usage|quota) today\b", norm):
+        _, count = _cloud_usage_today()
+        conf = _cloud_conf()
+        cap = conf["daily_cap"] or "unlimited"
+        state = "on" if (conf["enabled"] and conf["key"]) else "off"
+        _confirm(f"Cloud brain {state}. {count} of {cap} requests used today.")
+        return True
+
+    # General knowledge questions -> answer (use web context for factual/current ones)
+    if not _QUESTION_LIKE.search(norm):
+        return False
+    # Avoid stealing things that look like commands the intent router should handle
+    if re.search(r"\b(open|launch|start|run|close|focus|switch|move|go to|workspace|window|click|scroll|type|press|screenshot|copy|paste|lock|reboot|shutdown|restart|mute|volume|brightness|wifi|bluetooth|timer|remind|note)\b", norm):
+        # "how do I open..." / "what is the command..." are fine as questions
+        if not re.search(r"^(what is|what's|who is|who was|what does|what are|explain|tell me about|how does|why does|why is|why are|when was|when is|where is|where was)\b", norm):
+            return False
+    _popup(_NAME, "Thinking…", timeout_ms=3000)
+    use_web = bool(re.search(r"\b(latest|news|current|today|right now|recent|price|weather in|who won|score|release|update|version)\b", norm))
+    context = web_lookup(raw.strip()) if use_web else ""
+    ans = ask_ai(raw.strip(), context=context)
+    if not ans:
+        return False
+    _touch_interaction()
+    _popup(_NAME, ans[:900], timeout_ms=12000)
+    _speak(_with_address(ans, is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
+
+
 # --- morning brief: time + classes + weather + homelab in one shot ------------
 def _handle_brief(norm: str) -> bool:
     if not re.search(r"\bbrief me\b|morning brief|daily brief|start my day|"
@@ -3098,6 +3506,22 @@ def try_task_intent(raw: str) -> bool:
     for handler in (_handle_timers, _handle_notes, _handle_worldclock):
         if handler(norm):
             return True
+    # Cloud brain voice controls (specific commands, safe to handle early).
+    if re.search(r"\bcloud brain on\b|\benable cloud\b|\bturn on cloud\b", norm):
+        _cloud_set_enabled(True)
+        _confirm("Cloud brain on.")
+        return True
+    if re.search(r"\bcloud brain off\b|\bdisable cloud\b|\bturn off cloud\b", norm):
+        _cloud_set_enabled(False)
+        _confirm("Cloud brain off.")
+        return True
+    if re.search(r"\bhow many cloud (requests|calls)|cloud (requests|usage|quota) today\b", norm):
+        _, count = _cloud_usage_today()
+        conf = _cloud_conf()
+        cap = conf["daily_cap"] or "unlimited"
+        state = "on" if (conf["enabled"] and conf["key"]) else "off"
+        _confirm(f"Cloud brain {state}. {count} of {cap} requests used today.")
+        return True
     # Answers + web before weather ("search the web for weather" = search).
     for handler in (_handle_calc, _handle_spell, _handle_translate, _handle_web):
         if handler(norm):
@@ -3145,6 +3569,10 @@ def try_task_intent(raw: str) -> bool:
     # Time / date.
     if re.search(r"\b(what time|current time|tell me the time|what.*date|what day is|today.s date)\b", norm):
         return _handle_time_date(norm)
+    # Open-ended questions / web-and-summarize: AI answer as last deterministic
+    # resort (cloud if configured, else local Ollama), with web context when useful.
+    if _handle_ai_question(norm, raw):
+        return True
     return False
 
 
@@ -3202,6 +3630,12 @@ if try_task_intent(prompt):
 # Fast-path: common apps open in ~50ms with no Ollama round-trip.
 if try_fast_launch(prompt):
     sys.exit(0)
+
+# Open-ended questions: prefer a direct AI answer (fast cloud if configured,
+# else local Ollama text) over the slow intent-router "I didn't catch that".
+if _QUESTION_LIKE.search(_normalise(prompt)) or _WANTS_SUMMARY.search(_normalise(prompt)):
+    if _handle_ai_question(_normalise(prompt), prompt):
+        sys.exit(0)
 
 # Correct Hyprland 0.56+ syntax — sourced from hl.meta.lua + tiling.lua + capabilities.py HYPR_ESSENTIALS
 system_prompt = """You are """ + _NAME + """, the voice intelligence of Omarchy OS, a context-aware command executor and assistant purpose-built for complete control over the host operating system. Your primary goal is to interpret conversational speech, intent, and ambient context into accurate, safe, and efficient system-level operations across all connected applications, services, shell environments, and UI components.
