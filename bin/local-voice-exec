@@ -3336,18 +3336,23 @@ def _cloud_chat(messages: list[dict], *, max_tokens: int = 180, timeout: float =
     return None
 
 
-def _ollama_chat(system: str, user: str, *, max_tokens: int = 180, timeout: float = 20.0) -> str | None:
+def _ollama_chat(system: str, user: str, *, max_tokens: int = 220, timeout: float = 22.0) -> str | None:
     """Fast local Q&A via Ollama (plain text, not intent JSON)."""
+    return _ollama_chat_messages(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=max_tokens, timeout=timeout,
+    )
+
+
+def _ollama_chat_messages(messages: list[dict], *, max_tokens: int = 300, timeout: float = 25.0) -> str | None:
+    """Local Q&A via Ollama with full message history."""
     if REHEARSAL:
         return None
     payload = json.dumps({
         "model": "qwen2.5:3b",
         "keep_alive": "30m",
         "stream": False,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages,
         "options": {"temperature": 0.4, "num_predict": max_tokens},
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -3364,10 +3369,11 @@ def _ollama_chat(system: str, user: str, *, max_tokens: int = 180, timeout: floa
 
 
 _QA_SYSTEM = (
-    "You are {name}, a helpful voice assistant on the user's Linux desktop. "
-    "Answer clearly and accurately in 1-3 short sentences suitable for speech. "
-    "No markdown, no lists, no URLs, no code blocks. "
-    "If you don't know, say so briefly."
+    "You are {name}, a helpful, intelligent voice assistant on the user's Linux desktop. "
+    "Give clear, accurate, useful answers in natural spoken language (about 2-5 short sentences). "
+    "Be specific and informative, not vague. Use conversation history for follow-ups and pronouns. "
+    "If you are unsure, say so briefly and offer the best helpful guidance. "
+    "No markdown, no bullet lists, no URLs, no code blocks."
 )
 
 
@@ -3389,31 +3395,79 @@ def _personality_prompt() -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
-def _speakable_answer(text: str, limit: int = 420) -> str:
+def _speakable_answer(text: str, limit: int = 700) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    text = re.sub(r"[*_#>]+", " ", text)
+    text = re.sub(r"[*_#>•\-]+", " ", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         cut = text.rfind(". ", 0, limit)
-        text = (text[:cut + 1] if cut > 80 else text[: limit - 1].rstrip() + "…")
+        if cut < 120:
+            cut = text.rfind("! ", 0, limit)
+        if cut < 120:
+            cut = text.rfind("? ", 0, limit)
+        text = (text[:cut + 1] if cut > 120 else text[: limit - 1].rstrip() + "…")
     return text
 
 
-def ask_ai(question: str, context: str = "") -> str | None:
+CHAT_FILE = STATE_DIR / "conversation.json"
+_CHAT_MAX_TURNS = 10  # messages total (user+assistant)
+
+
+def _load_chat_history() -> list[dict]:
+    if REHEARSAL or os.environ.get("VOICE_DRYRUN"):
+        return []
+    try:
+        if _is_conversation_start():
+            return []
+        data = json.loads(CHAT_FILE.read_text())
+        if not isinstance(data, list):
+            return []
+        out = []
+        for m in data[-_CHAT_MAX_TURNS:]:
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+                c = str(m.get("content", "")).strip()
+                if c:
+                    out.append({"role": m["role"], "content": c[:1200]})
+        return out
+    except Exception:
+        return []
+
+
+def _save_chat_turn(user: str, assistant: str) -> None:
+    if REHEARSAL or os.environ.get("VOICE_DRYRUN"):
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        hist = _load_chat_history()
+        hist.append({"role": "user", "content": (user or "").strip()[:1200]})
+        hist.append({"role": "assistant", "content": (assistant or "").strip()[:1200]})
+        CHAT_FILE.write_text(json.dumps(hist[-_CHAT_MAX_TURNS:], ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def ask_ai(question: str, context: str = "", history: list[dict] | None = None) -> str | None:
     """Answer an open-ended question: cloud first (if enabled), else local."""
     sysmsg = _QA_SYSTEM.format(name=_NAME) + _personality_prompt()
     if context:
-        user = f"Context:\n{context[:1800]}\n\nQuestion: {question}"
+        user = f"Context:\n{context[:2200]}\n\nQuestion: {question}"
     else:
         user = question
-    msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]
-    ans = _cloud_chat(msgs, max_tokens=180, timeout=10.0)
+    base = [{"role": "system", "content": sysmsg}]
+    if history:
+        base.extend(history[-_CHAT_MAX_TURNS:])
+    msgs = base + [{"role": "user", "content": user}]
+    ans = _cloud_chat(msgs, max_tokens=400, timeout=15.0)
     if not ans:
         local_sys = sysmsg + (" Use the provided context." if context else "")
-        ans = _ollama_chat(local_sys, user, max_tokens=160, timeout=18.0)
+        local_base = [{"role": "system", "content": local_sys}]
+        if history:
+            local_base.extend(history[-_CHAT_MAX_TURNS:])
+        ans = _ollama_chat_messages(local_base + [{"role": "user", "content": user}],
+                                    max_tokens=300, timeout=25.0)
     return _speakable_answer(ans) if ans else None
 
 
@@ -3484,8 +3538,12 @@ _WANTS_SUMMARY = re.compile(
     r"\b(and )?(tell me( about it)?|summari[sz]e( it)?|explain( it)?|what (does|do|is|are) (it|that|they) say|what'?s it about|give me (a )?(summary|overview|rundown))\b"
 )
 _QUESTION_LIKE = re.compile(
-    r"^(what|who|when|where|why|how|which|explain|define|tell me about|can you tell me|do you know)\b"
-    r"|(\bwhat is\b|\bwho is\b|\bwho was\b|\bhow does\b|\bhow do\b|\bwhy does\b|\bwhy do\b|\bmeaning of\b)"
+    r"^(what|who|when|where|why|how|which|explain|define|describe|compare|tell me about|can you tell me|do you know|could you|would you)\b"
+    r"|(\bwhat is\b|\bwho is\b|\bwho was\b|\bhow does\b|\bhow do\b|\bwhy does\b|\bwhy do\b|\bmeaning of\b|\bdifference between\b)"
+)
+_FOLLOWUP_LIKE = re.compile(
+    r"^(tell me more|go on|continue|elaborate|say more|more detail|details|and\??$|what about|how about|why\??$|how\??$|really\??$|like what\??$)\b"
+    r"|(\btell me more\b|\belaborate\b|\bgo on\b|\bexplain (that|this|it) further\b|\bwhat do you mean\b|\bcan you explain\b)"
 )
 
 
@@ -3499,8 +3557,10 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
         q = q or raw.strip()
         _visual("thinking")
         context = web_lookup(q)
-        ans = ask_ai(q, context=context) or "I couldn't find a clear answer right now."
+        history = _load_chat_history()
+        ans = ask_ai(q, context=context, history=history) or "I couldn't find a clear answer right now."
         _touch_interaction()
+        _save_chat_turn(raw.strip(), ans)
         _popup(_NAME, ans[:900], timeout_ms=12000)
         _speak(_with_address(ans, is_start=_is_conversation_start()))
         _touch_interaction()
@@ -3523,22 +3583,26 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
         _confirm(f"Cloud brain {state}. {count} of {cap} requests used today.")
         return True
 
+    history = _load_chat_history()
+    followup = bool(history) and bool(_FOLLOWUP_LIKE.search(norm) or (len(norm.split()) <= 6 and norm.endswith("?")))
+
     # General knowledge questions -> answer (use web context for factual/current ones)
-    if not _QUESTION_LIKE.search(norm):
+    if not _QUESTION_LIKE.search(norm) and not followup:
         return False
     # Avoid stealing things that look like commands the intent router should handle
     if re.search(r"\b(open|launch|start|run|close|focus|switch|move|go to|workspace|window|click|scroll|type|press|screenshot|copy|paste|lock|reboot|shutdown|restart|mute|volume|brightness|wifi|bluetooth|timer|remind|note)\b", norm):
         # "how do I open..." / "what is the command..." are fine as questions
-        if not re.search(r"^(what is|what's|who is|who was|what does|what are|explain|tell me about|how does|why does|why is|why are|when was|when is|where is|where was)\b", norm):
+        if not re.search(r"^(what is|what's|who is|who was|what does|what are|explain|tell me about|how does|why does|why is|why are|when was|when is|where is|where was|how do i|how can i|can you explain)\b", norm) and not followup:
             return False
     _visual("thinking")
     use_web = bool(re.search(r"\b(latest|news|current|today|right now|recent|price|weather in|who won|score|release|update|version)\b", norm))
     context = web_lookup(raw.strip()) if use_web else ""
-    ans = ask_ai(raw.strip(), context=context)
+    ans = ask_ai(raw.strip(), context=context, history=history)
     if not ans:
         _visual("hide")
         return False
     _touch_interaction()
+    _save_chat_turn(raw.strip(), ans)
     _popup(_NAME, ans[:900], timeout_ms=12000)
     _speak(_with_address(ans, is_start=_is_conversation_start()))
     _touch_interaction()
@@ -3729,10 +3793,14 @@ if try_task_intent(prompt):
 if try_fast_launch(prompt):
     sys.exit(0)
 
-# Open-ended questions: prefer a direct AI answer (fast cloud if configured,
-# else local Ollama text) over the slow intent-router "I didn't catch that".
-if _QUESTION_LIKE.search(_normalise(prompt)) or _WANTS_SUMMARY.search(_normalise(prompt)):
-    if _handle_ai_question(_normalise(prompt), prompt):
+# Open-ended questions / follow-ups: prefer a direct AI answer (fast cloud if
+# configured, else local Ollama text) over the slow intent-router fallback.
+_norm_prompt = _normalise(prompt)
+_has_history = bool(_load_chat_history())
+_is_followup = _has_history and bool(_FOLLOWUP_LIKE.search(_norm_prompt))
+if (_QUESTION_LIKE.search(_norm_prompt) or _WANTS_SUMMARY.search(_norm_prompt)
+        or _is_followup):
+    if _handle_ai_question(_norm_prompt, prompt):
         sys.exit(0)
 
 # Correct Hyprland 0.56+ syntax — sourced from hl.meta.lua + tiling.lua + capabilities.py HYPR_ESSENTIALS
@@ -3941,9 +4009,20 @@ try:
                 # Song-ID question the matcher missed ("what's the song").
                 notify = ""
             else:
-                # Persona: graceful degrade to a targeted clarifying question.
-                notify = ("I didn't catch that, Sir. Did you want an app, "
-                          "a workspace, the weather, or a reminder?")
+                # Conversational/general fallback: try a smart reply before giving up.
+                history = _load_chat_history()
+                ans = ask_ai(prompt.strip(), history=history)
+                if ans:
+                    _save_chat_turn(prompt.strip(), ans)
+                    _touch_interaction()
+                    _popup(_NAME, ans[:900], timeout_ms=12000)
+                    _speak(_with_address(ans, is_start=_is_conversation_start()))
+                    _touch_interaction()
+                    notify = ""
+                else:
+                    # Persona: graceful degrade to a targeted clarifying question.
+                    notify = ("I didn't catch that, Sir. Did you want an app, "
+                              "a workspace, the weather, or a reminder?")
         elif act_type == "system" and target:
             # LLM-routed power action: safe ops run, destructive ones ask.
             t = target.lower().strip()
