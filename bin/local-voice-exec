@@ -488,18 +488,13 @@ _RUBY_ICON = next((str(p) for p in (
 
 
 def _visual(state: str) -> None:
-    """Best-effort Ruby visual overlay (listening/thinking/speaking/hide)."""
+    """Update Ruby bar/listening state (no floating avatar overlay)."""
     if REHEARSAL or os.environ.get("VOICE_DRYRUN"):
         return
-    helper = Path.home() / ".local/bin/ruby-visual"
-    if not helper.exists():
-        helper = Path(__file__).resolve().parent / "ruby-visual"
-    if not helper.exists():
-        return
     try:
-        subprocess.Popen([str(helper), state], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "voice-assistant"
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / "ruby_state").write_text(state)
     except Exception:
         pass
 

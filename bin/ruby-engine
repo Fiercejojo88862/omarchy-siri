@@ -187,7 +187,22 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         hero = Adw.StatusPage()
         hero.set_title("Ruby")
         hero.set_description("Your voice intelligence on Omarchy — local-first, fast, and yours.")
-        hero.set_icon_name("audio-input-microphone-symbolic")
+        # Avatar lives in the app (not as a floating desktop overlay).
+        try:
+            here = Path(__file__).resolve().parent.parent
+            candidates = [
+                here / "assets" / "ruby-assistant.jpg",
+                Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
+                here / "assets" / "ruby-icon.jpg",
+            ]
+            img = next((str(p) for p in candidates if p.exists()), "")
+            if img:
+                texture = Gdk.Texture.new_from_filename(img)
+                hero.set_paintable(texture)
+            else:
+                hero.set_icon_name("audio-input-microphone-symbolic")
+        except Exception:
+            hero.set_icon_name("audio-input-microphone-symbolic")
         page.append(hero)
 
         group = Adw.PreferencesGroup(title="Quick actions")
