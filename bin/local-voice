@@ -104,9 +104,10 @@ stop_recording() {
             # No speech heard — music may be playing instead. Fall through to
             # Shazam automatically (records its own fresh sample in exec).
             printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
+            notify-send -t 1500 "Ruby" "No speech — listening for music..." 2>/dev/null || true
             exec ~/.local/bin/local-voice-exec "shazam this"
         fi
-        # dispatch (bar shows listening state; exec handles response state)
+        # dispatch (exec handles response state)
         exec ~/.local/bin/local-voice-exec "$TEXT"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true
