@@ -121,7 +121,8 @@ stop_recording() {
             notify-send -t 1500 "Ruby" "No speech — listening for music..." 2>/dev/null || true
             exec ~/.local/bin/local-voice-exec "shazam this"
         fi
-        # dispatch (exec handles response state)
+        # Show what was heard for quick feedback/debugging, then dispatch.
+        notify-send -t 1200 "Ruby" "Heard: $TEXT" 2>/dev/null || true
         exec ~/.local/bin/local-voice-exec "$TEXT"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true
