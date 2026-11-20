@@ -36,35 +36,35 @@ window, .bg {
   background: transparent;
 }
 .frame {
-  background: rgba(20, 20, 24, 0.55);
+  background: rgba(20, 20, 24, 0.40);
   border-radius: 9999px;
-  padding: 10px;
+  padding: 4px;
 }
 .ring {
   border-radius: 9999px;
-  padding: 6px;
+  padding: 3px;
 }
 .ring.listening {
-  background: rgba(120, 170, 255, 0.85);
+  background: rgba(120, 170, 255, 0.90);
 }
 .ring.thinking {
-  background: rgba(255, 200, 120, 0.85);
+  background: rgba(255, 200, 120, 0.90);
 }
 .ring.speaking {
-  background: rgba(160, 255, 170, 0.85);
+  background: rgba(160, 255, 170, 0.90);
 }
 .pulse1 { opacity: 1.0; }
-.pulse2 { opacity: 0.85; }
-.pulse3 { opacity: 0.7; }
+.pulse2 { opacity: 0.75; }
+.pulse3 { opacity: 0.5; }
 .avatar {
   border-radius: 9999px;
 }
 .label {
   color: white;
   font-weight: bold;
-  font-size: 13px;
-  margin-top: 6px;
-  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  font-size: 10px;
+  margin-top: 2px;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
 }
 """
 
@@ -143,7 +143,7 @@ def run_overlay():
         win.set_decorated(False)
         win.set_resizable(False)
         try:
-            win.set_default_size(220, 260)
+            win.set_default_size(64, 64)
         except Exception:
             pass
 
@@ -157,7 +157,7 @@ def run_overlay():
         except Exception:
             pass
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         outer.set_halign(Gtk.Align.CENTER)
         outer.set_valign(Gtk.Align.CENTER)
         outer.add_css_class("frame")
@@ -173,21 +173,21 @@ def run_overlay():
             try:
                 texture = Gdk.Texture.new_from_filename(IMAGE_PATH)
                 picture = Gtk.Picture.new_for_paintable(texture)
-                picture.set_size_request(160, 160)
+                picture.set_size_request(50, 50)
                 picture.set_content_fit(Gtk.ContentFit.COVER)
                 picture.add_css_class("avatar")
-                # Try to make it circular-ish via CSS overflow isn't trivial in GTK4;
-                # picture will be square but ring gives nice effect.
+                # Small animated avatar with pulsing ring.
                 ring.append(picture)
             except Exception:
                 picture = None
         if picture is None:
-            lbl = Gtk.Label(label="Ruby")
-            lbl.set_size_request(160, 160)
+            lbl = Gtk.Label(label="R")
+            lbl.set_size_request(50, 50)
             ring.append(lbl)
 
         label = Gtk.Label(label="Listening…")
         label.add_css_class("label")
+        label.set_visible(False)
 
         outer.append(ring)
         outer.append(label)
@@ -230,7 +230,7 @@ def run_overlay():
         apply_state()
         win.present()
 
-        # Best-effort: float, pin, and move to top-left on Hyprland.
+        # Best-effort: float, pin, and move to top-left on Hyprland (0.56+ API).
         def position():
             try:
                 r = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True, timeout=2)
@@ -243,10 +243,17 @@ def run_overlay():
                             addr = c.get("address")
                             break
                     if addr:
-                        subprocess.run(["hyprctl", "dispatch", "setfloating", f"address:{addr}"], capture_output=True, timeout=2)
-                        subprocess.run(["hyprctl", "dispatch", "pin", f"address:{addr}"], capture_output=True, timeout=2)
-                        # move to top-left with margin below typical bar
-                        subprocess.run(["hyprctl", "dispatch", "movewindowpixel", "exact 24 64,address:" + addr], capture_output=True, timeout=2)
+                        w = f'window = "address:{addr}"'
+                        # float (best-effort across API variants), pin, then move top-left
+                        subprocess.run(["hyprctl", "dispatch",
+                                        f'hl.dsp.window.float({{ {w}, action = "set" }})'],
+                                       capture_output=True, timeout=2)
+                        subprocess.run(["hyprctl", "dispatch",
+                                        f'hl.dsp.window.pin({{ {w} }})'],
+                                       capture_output=True, timeout=2)
+                        subprocess.run(["hyprctl", "dispatch",
+                                        f'hl.dsp.window.move({{ {w}, x = 24, y = 64 }})'],
+                                       capture_output=True, timeout=2)
                         return False
             except Exception:
                 pass
