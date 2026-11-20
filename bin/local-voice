@@ -66,6 +66,13 @@ stop_recording() {
     rm -f "$PIDFILE"
     # Immediate feedback on release — confirms stop before any processing delay
     notify-send -t 1000 "Voice" "Stopped listening — processing..." 2>/dev/null || true
+    # Grace period: let pw-record capture the tail end of speech so the last
+    # word/syllable isn't cut off when you press Insert while finishing a sentence.
+    # Tune with VOICE_STOP_GRACE (seconds); default 0.4s.
+    grace="${VOICE_STOP_GRACE:-0.4}"
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+        sleep "$grace" 2>/dev/null || sleep 0.4
+    fi
     if [[ -n "${pid:-}" ]]; then
         kill "$pid" 2>/dev/null || true
         # give pw-record time to flush wav header

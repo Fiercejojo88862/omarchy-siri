@@ -35,13 +35,28 @@ else
     echo "$TEXT" | piper --model "$VOICE_MODEL" --length-scale "$RATE" --noise-scale "$ENERGY" --output_file "$RAW_WAV" >/dev/null 2>&1 || exit 1
 fi
 
+# Stop any previous Ruby TTS playback so responses don't overlap/talk over each
+# other (multiple quick commands could otherwise queue audio on top of itself).
+PLAY_PIDFILE="$RUN/tts_play.pid"
+if [[ -f "$PLAY_PIDFILE" ]]; then
+    oldpid=$(cat "$PLAY_PIDFILE" 2>/dev/null || true)
+    [[ -n "${oldpid:-}" ]] && kill "$oldpid" 2>/dev/null || true
+    rm -f "$PLAY_PIDFILE"
+fi
+
+# Small pre-playback delay so speech doesn't start on top of notification
+# sounds or feel clipped at the beginning. Tune with VOICE_SPEAK_DELAY (seconds).
+speak_delay="${VOICE_SPEAK_DELAY:-0.25}"
+
 # Detached playback: a player inheriting a dispatch pipe keeps the caller
 # waiting and risks SIGTTIN — detached fds play and vanish.
 if command -v pw-play >/dev/null 2>&1; then
-    pw-play "$RAW_WAV" </dev/null >/dev/null 2>&1 &
+    ( sleep "$speak_delay" 2>/dev/null || true; exec pw-play "$RAW_WAV" ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$PLAY_PIDFILE"
     disown 2>/dev/null || true
 elif command -v paplay >/dev/null 2>&1; then
-    paplay "$RAW_WAV" </dev/null >/dev/null 2>&1 &
+    ( sleep "$speak_delay" 2>/dev/null || true; exec paplay "$RAW_WAV" ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$PLAY_PIDFILE"
     disown 2>/dev/null || true
 fi
 exit 0
