@@ -147,8 +147,7 @@ class RubyEngineWindow(Adw.ApplicationWindow):
 
         toolbar_view.add_top_bar(header)
 
-        self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.stack = Adw.ViewStack()
         toolbar_view.set_content(self.stack)
 
         view_switcher = Adw.ViewSwitcher()
