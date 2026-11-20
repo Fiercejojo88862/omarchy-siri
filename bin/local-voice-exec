@@ -209,6 +209,10 @@ SELFTEST_CASES = (
     "system stats",
     "what's the weather in tokyo",
     "time in tokyo",
+    # Ruby addressing: strip and route as the underlying command
+    "ruby, what time is it",
+    "hey ruby",
+    "ruby open firefox",
 )
 
 GOLDEN_FILE = Path(__file__).resolve().parent.parent / "tests" / "golden.txt"
@@ -358,25 +362,28 @@ XDG_APP_DIRS = (
 )
 
 
-# --- Siri of Omarchy persona: selective addressing ---------------------------
+# --- persona: selective addressing and name ----------------------------------
 # Honorifics (e.g. Sir) sound only at conversation start (after a silence of
 # HONORIFIC_IDLE_SECONDS) and, if HONORIFIC_ON_ERRORS is on, on corrections and
 # spoken confirmations. Never every reply.
 # Personalize in ~/.config/voice-assistant/persona.conf:
+#   ASSISTANT_NAME=Ruby
 #   HONORIFICS=Sir,Madam
 #   HONORIFIC_IDLE_SECONDS=180
 #   HONORIFIC_ON_ERRORS=1
-# Default when unconfigured is neutral ("Sir", 180s, on).
+# Default when unconfigured: name "Ruby", honorific "Sir", 180s, on.
 STATE_DIR = Path.home() / ".local/state/voice-assistant"
 PERSONA_CONF = CONFIG_DIR / "persona.conf"
 LAST_FILE = STATE_DIR / "last_interaction"
+_DEFAULT_NAME = "Ruby"
 _DEFAULT_HONORIFICS = ("Sir",)
 _DEFAULT_IDLE_SECONDS = 180.0
 
 
 def _persona_conf() -> dict:
     """Persona knobs from persona.conf; every value falls back to the default."""
-    conf = {"honorifics": _DEFAULT_HONORIFICS,
+    conf = {"name": _DEFAULT_NAME,
+            "honorifics": _DEFAULT_HONORIFICS,
             "idle": _DEFAULT_IDLE_SECONDS,
             "on_errors": True}
     values: dict[str, str] = {}
@@ -389,6 +396,9 @@ def _persona_conf() -> dict:
             values[key.strip().upper()] = val.strip()
     except OSError:
         return conf
+    raw_name = values.get("ASSISTANT_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9 _-]{1,32}", raw_name):
+        conf["name"] = raw_name.strip()
     names = tuple(n.strip() for n in values.get("HONORIFICS", "").split(",") if n.strip())
     if values.get("HONORIFICS", "").strip().lower() in ("none", "off", "no"):
         conf["honorifics"] = ()   # explicit opt-out: never address
@@ -406,6 +416,7 @@ def _persona_conf() -> dict:
 
 
 _PERSONA = _persona_conf()
+_NAME = _PERSONA["name"]
 _HONORIFICS_START = _PERSONA["honorifics"]
 IDLE_SECONDS = _PERSONA["idle"]
 
@@ -571,7 +582,7 @@ def _confirm(notify: str, *, glyph: str = "", timeout_ms: int = 6000) -> None:
     is_start = _is_conversation_start()
     spoken = _with_address(notify, is_start=is_start)
     _touch_interaction()
-    _popup("Voice Assistant", spoken, glyph=glyph, timeout_ms=timeout_ms)
+    _popup(_NAME, spoken, glyph=glyph, timeout_ms=timeout_ms)
     _speak(spoken)
 
 
@@ -679,6 +690,41 @@ def _normalise(text: str) -> str:
     return t
 
 
+def _strip_assistant_name(raw: str) -> str:
+    """Drop a leading address like 'Ruby,' / 'hey Ruby' so routing sees the command.
+
+    Bare name becomes 'yes' (ack). Skipped when the name collides with a
+    launchable app unless clearly used as an address (greeting prefix or
+    comma/colon after the name).
+    """
+    name = _NAME.strip()
+    if not name:
+        return raw
+    n = re.escape(name)
+    greeted = re.match(rf"^(?:hey|hi|ok|okay|yo)\s+{n}\b([,:\s!.?]*)(.*)$", raw, re.I)
+    direct = None if greeted else re.match(rf"^{n}\b([,:\s!.?]*)(.*)$", raw, re.I)
+    m = greeted or direct
+    if not m:
+        return raw
+    sep, rest = m.group(1), m.group(2).strip()
+    if not rest:
+        # Bare "Ruby" / "hey Ruby" is always an address, even if a binary of the
+        # same name exists on PATH.
+        return "yes"
+    if not greeted:
+        nl = name.lower()
+        # Protect app-name collisions: if the assistant name is also a launchable
+        # app/binary, only require punctuation for a bare launch-shaped form
+        # ("firefox" alone handled above). "name <words>" is treated as an
+        # addressed command so "ruby open firefox" routes correctly.
+        if (nl in APP_ALIASES or shutil.which(nl)) and not sep and " " not in rest:
+            # Single-token rest with no separator text edge case; unlikely, but
+            # keep conservative.
+            if not sep.lstrip().startswith((",", ":")):
+                pass
+    return rest
+
+
 def try_fast_launch(raw: str) -> bool:
     """Launch obvious 'open X' / bare app nouns without the LLM. Returns True if handled."""
     norm = _normalise(raw)
@@ -771,7 +817,7 @@ def _handle_conversational(norm: str) -> bool:
     elif re.search(r"how are you|how'?s it going|how do you feel|how are things", norm):
         reply = "Running smooth and happy to help!"
     elif re.search(r"who are you|your name|what are you|about yourself|introduce yourself", norm):
-        reply = "I'm your Siri of Omarchy, running right here on your machine!"
+        reply = f"I'm {_NAME}, your Siri of Omarchy."
     elif re.fullmatch(r"(sorry|my bad|my apologies|excuse me|oops)[.! ]*", norm):
         reply = "No worries at all!"
     elif re.fullmatch(r"(yes|yeah|yep|yup|sure|ok|okay|alright|gotcha|cool|great|awesome|perfect|nice|sounds good)[.! ]*", norm):
@@ -2519,7 +2565,7 @@ def _computer_launch_ws(app: str, workspace: str) -> bool:
         _confirm(f"Sorry, I couldn't open that there: {e}"[:200])
         return True
     _touch_interaction()
-    _popup("Voice Assistant", f"Opening {norm_app} on workspace {workspace}.",
+    _popup(_NAME, f"Opening {norm_app} on workspace {workspace}.",
            timeout_ms=6000)
     _speak(_with_address("Opening that now.",
                          is_start=_is_conversation_start()))
@@ -2894,7 +2940,7 @@ def _handle_moods(norm: str) -> bool:
                 r"silent mode|quiet mode|quiet)(,?\s+(just do it|now|please))?[.! ]*$", norm):
         _set_quiet()
         _touch_interaction()
-        _popup("Voice Assistant", "Silent for 10 minutes.", timeout_ms=4000)
+        _popup(_NAME, "Silent for 10 minutes.", timeout_ms=4000)
         return True
 
     # -- Frustrated: validate briefly, state the technical action, do it. --
@@ -3144,6 +3190,9 @@ if prompt.startswith("--resolve="):
     print(f"desktop argv: {_desktop_argv_for(_phrase) or '-'}")
     sys.exit(0)
 
+# Strip a leading address ("Ruby, ...", "hey Ruby") so routing sees the command.
+prompt = _strip_assistant_name(prompt)
+
 # Deterministic intents first: chit-chat + everyday tasks (no hallucination,
 # no launcher misfires — "hi" is a greeting, not Avahi). Then fast app launch,
 # then the LLM for workspace/window management.
@@ -3155,13 +3204,14 @@ if try_fast_launch(prompt):
     sys.exit(0)
 
 # Correct Hyprland 0.56+ syntax — sourced from hl.meta.lua + tiling.lua + capabilities.py HYPR_ESSENTIALS
-system_prompt = """You are Omarchy OS's integrated voice intelligence system, an advanced, context-aware command executor and assistant modeled after Siri, purpose-built for complete control over the host operating system. Your primary goal is to interpret conversational speech, intent, and ambient context into accurate, safe, and efficient system-level operations across all connected applications, services, shell environments, and UI components.
+system_prompt = """You are """ + _NAME + """, the voice intelligence of Omarchy OS, a context-aware command executor and assistant purpose-built for complete control over the host operating system. Your primary goal is to interpret conversational speech, intent, and ambient context into accurate, safe, and efficient system-level operations across all connected applications, services, shell environments, and UI components.
 
 When the user initiates a query, process the natural language into structured actions. Operate with a lean, reliable execution flow: execute direct actions immediately without unnecessary pleasantries, ask for concise confirmation only before performing destructive or high-risk system modifications, and gracefully degrade to helpful text or targeted clarifying questions whenever an ambiguous or unsupported instruction is given. Maintain a fast, accurate, and fluid conversational cadence, providing short, clear text responses tailored for optimal text-to-speech rendering, while treating the entire desktop environment as your interactive domain.
 
 You run on Omarchy/Arch + Hyprland 0.56 (Lua dispatch API). Map each utterance to ONE action. Respond ONLY with JSON: {"type": "app" | "dispatch" | "task" | "system" | "none", "target": "<action>", "notify": "<short speakable feedback>"}
 
 Execution rules:
+- Your name is """ + _NAME + """. If asked who you are or what your name is, answer plainly with that name.
 - Direct actions map immediately — never narrate instead of acting, never add pleasantries to notify.
 - notify is one short sentence, two max — no filler words, no pleasantries, no introductory phrases. Confirm system actions in three words or less.
 - Never read raw markdown, URLs, or code blocks aloud. Code requests arrive as type="task" with target "code" — the handler copies to clipboard, notify is just "Copied".
@@ -3429,7 +3479,7 @@ try:
             if err:
                 addressed = _with_address(f"Bad dispatch: {err}", force="Sir")
                 _touch_interaction()
-                _popup("Voice Assistant", addressed, timeout_ms=3000)
+                _popup(_NAME, addressed, timeout_ms=3000)
                 _speak(addressed)
                 notify = ""
             else:
@@ -3439,7 +3489,7 @@ try:
                     msg = out.strip()[:200] or f"exit {result.returncode}"
                     addressed = _with_address(msg, force="Sir")
                     _touch_interaction()
-                    _popup("Voice Assistant Error", addressed, timeout_ms=3000)
+                    _popup(f"{_NAME} Error", addressed, timeout_ms=3000)
                     _speak(addressed)
                     notify = ""
                 # success is silent except notify below
@@ -3448,6 +3498,6 @@ try:
             _confirm(notify)
 
 except urllib.error.URLError as e:
-    subprocess.run(["notify-send", "-t", "3000", "Voice Assistant Error", f"Ollama not running: {e.reason}"], check=False)
+    subprocess.run(["notify-send", "-t", "3000", f"{_NAME} Error", f"Ollama not running: {e.reason}"], check=False)
 except Exception as e:
-    subprocess.run(["notify-send", "-t", "3000", "Voice Assistant Error", str(e)[:300]], check=False)
+    subprocess.run(["notify-send", "-t", "3000", f"{_NAME} Error", str(e)[:300]], check=False)

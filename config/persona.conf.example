@@ -1,5 +1,10 @@
-# Siri addressing — copy to ~/.config/voice-assistant/persona.conf
+# Ruby addressing — copy to ~/.config/voice-assistant/persona.conf
 # Applied on the next command; no restart needed. Defaults shown below.
+#
+# ASSISTANT_NAME: the name she uses in self-intro and answers to. Only the
+#             spoken name and popup headlines change; the "Siri of Omarchy"
+#             project name in docs stays. Default: Ruby
+ASSISTANT_NAME=Ruby
 #
 # HONORIFICS: comma-separated pool. Only the first is used unless you add more,
 #             in which case they rotate by day so it never sounds mechanical.

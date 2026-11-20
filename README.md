@@ -25,7 +25,7 @@ INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
 * `bin/local-voice-translate` — offline translation (local Ollama by default; LibreTranslate or argos opt-in)
 * `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
 * `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
-* `config/*.example` — calendar + persona templates
+* `config/*.example` — calendar, weather, translation, and persona templates (`ASSISTANT_NAME`, default Ruby, sets the name she uses in self-intro and answers to)
 
 ## 🚀 Install
 
@@ -56,7 +56,7 @@ Safety: locked sessions, password fields and system auth dialogs always refuse (
 Add the keybinding to `~/.config/hypr/bindings.lua`, then `hyprctl reload`:
 
 ```lua
-o.bind("Insert", "Voice: talk / send", "local-voice toggle")
+o.bind("Insert", "Ruby: talk / send", "local-voice toggle")
 ```
 
 ## 🔊 Voice
@@ -75,7 +75,7 @@ Translation is local: "how do you say good morning in Spanish" runs through your
 
 ## 🧪 Tests
 
-`local-voice-exec --selftest` replays 68 phrases through the real router and compares the result to `tests/golden.txt`. It runs in a throwaway `HOME`, in rehearsal mode: no process is launched, no URL fetched, no audio synthesized, hypruse is never imported. Every case prints what would be said, popped up, launched or opened, plus a `HANDLER` line naming the skill that claimed it (or `LLM` when it fell through to the model).
+`local-voice-exec --selftest` replays 71 phrases through the real router and compares the result to `tests/golden.txt`. It runs in a throwaway `HOME`, in rehearsal mode: no process is launched, no URL fetched, no audio synthesized, hypruse is never imported. Every case prints what would be said, popped up, launched or opened, plus a `HANDLER` line naming the skill that claimed it (or `LLM` when it fell through to the model).
 
 ```sh
 local-voice-exec --selftest            # PASS/FAIL against the golden file
