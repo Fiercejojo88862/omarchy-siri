@@ -49,11 +49,17 @@ start_recording() {
     rm -f "$AUDIOFILE"
     # Signal listening state for top bar indicator.
     printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
-    RUBY_IMG="$HOME/omarchy-siri/assets/ruby-assistant.jpg"
-    [[ -f "$RUBY_IMG" ]] || RUBY_IMG="$HOME/Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg"
-    if command -v omarchy-notification-send >/dev/null 2>&1 && [[ -f "$RUBY_IMG" ]]; then
+    RUBY_IMG=""
+    for p in \
+        "$HOME/omarchy-siri/assets/ruby-assistant.png" \
+        "$HOME/omarchy-siri/assets/ruby-assistant.jpg" \
+        "$HOME/Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.png" \
+        "$HOME/Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg"; do
+        [[ -f "$p" ]] && RUBY_IMG="$p" && break
+    done
+    if command -v omarchy-notification-send >/dev/null 2>&1 && [[ -n "$RUBY_IMG" ]]; then
         omarchy-notification-send -u low -t 1200 --image "$RUBY_IMG" "Ruby" "Listening..." 2>/dev/null || true
-    elif [[ -f "$RUBY_IMG" ]]; then
+    elif [[ -n "$RUBY_IMG" ]]; then
         notify-send -t 1200 -i "$RUBY_IMG" "Ruby" "Listening..." 2>/dev/null || true
     else
         notify-send -t 1200 "Ruby" "Listening..." 2>/dev/null || true

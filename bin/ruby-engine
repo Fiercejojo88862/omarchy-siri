@@ -191,7 +191,9 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         try:
             here = Path(__file__).resolve().parent.parent
             candidates = [
+                here / "assets" / "ruby-assistant.png",
                 here / "assets" / "ruby-assistant.jpg",
+                Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.png",
                 Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
                 here / "assets" / "ruby-icon.jpg",
             ]

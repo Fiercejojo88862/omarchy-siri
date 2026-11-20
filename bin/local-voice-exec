@@ -474,10 +474,12 @@ def _with_address(text: str, *, force: str = "", is_start: bool = False) -> str:
     return text
 
 
-# Ruby images for notifications/overlay (repo assets preferred).
+# Ruby images for notifications/app (repo assets preferred).
 _HERE = Path(__file__).resolve().parent.parent
 _RUBY_IMAGE = next((str(p) for p in (
+    _HERE / "assets" / "ruby-assistant.png",
     _HERE / "assets" / "ruby-assistant.jpg",
+    Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.png",
     Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
 ) if p.exists()), "")
 _RUBY_ICON = next((str(p) for p in (
