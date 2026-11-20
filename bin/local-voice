@@ -47,8 +47,9 @@ start_recording() {
     flock -n 9 || exit 0
 
     rm -f "$AUDIOFILE"
-    # Signal listening state for top bar indicator (no floating avatar overlay).
+    # Signal listening state for top bar indicator.
     printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
+    notify-send -t 1200 "Ruby" "Listening..." 2>/dev/null || true
     # 16k mono is what base.en expects; wav file. Detached fds ($LOG, /dev/null)
     # so the press dispatch returns at once — see NOTE above. Plain & keeps
     # $! accurate for PIDFILE (no setsid wrapper in between).
@@ -86,6 +87,7 @@ stop_recording() {
         # ensure file exists and has data (> 1KB)
         if [[ ! -f "$AUDIOFILE" ]] || [[ $(stat -c%s "$AUDIOFILE" 2>/dev/null || echo 0) -lt 1500 ]]; then
             printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
+            notify-send -t 1200 "Ruby" "Too short" 2>/dev/null || true
             rm -f "$AUDIOFILE"
             exit 0
         fi
