@@ -143,7 +143,7 @@ def run_overlay():
         win.set_decorated(False)
         win.set_resizable(False)
         try:
-            win.set_default_size(64, 64)
+            win.set_default_size(90, 90)
         except Exception:
             pass
 
@@ -173,16 +173,16 @@ def run_overlay():
             try:
                 texture = Gdk.Texture.new_from_filename(IMAGE_PATH)
                 picture = Gtk.Picture.new_for_paintable(texture)
-                picture.set_size_request(50, 50)
+                picture.set_size_request(75, 75)
                 picture.set_content_fit(Gtk.ContentFit.COVER)
                 picture.add_css_class("avatar")
-                # Small animated avatar with pulsing ring.
+                # Animated avatar with pulsing ring.
                 ring.append(picture)
             except Exception:
                 picture = None
         if picture is None:
             lbl = Gtk.Label(label="R")
-            lbl.set_size_request(50, 50)
+            lbl.set_size_request(75, 75)
             ring.append(lbl)
 
         label = Gtk.Label(label="Listening…")
@@ -230,7 +230,7 @@ def run_overlay():
         apply_state()
         win.present()
 
-        # Best-effort: float, pin, and move to top-left on Hyprland (0.56+ API).
+        # Best-effort: float, pin, and move under the Omarchy logo (top-left).
         def position():
             try:
                 r = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True, timeout=2)
@@ -244,15 +244,16 @@ def run_overlay():
                             break
                     if addr:
                         w = f'window = "address:{addr}"'
-                        # float (best-effort across API variants), pin, then move top-left
+                        # float (best-effort across API variants), pin, then move
                         subprocess.run(["hyprctl", "dispatch",
                                         f'hl.dsp.window.float({{ {w}, action = "set" }})'],
                                        capture_output=True, timeout=2)
                         subprocess.run(["hyprctl", "dispatch",
                                         f'hl.dsp.window.pin({{ {w} }})'],
                                        capture_output=True, timeout=2)
+                        # top-left corner, just below the bar/Omarchy logo
                         subprocess.run(["hyprctl", "dispatch",
-                                        f'hl.dsp.window.move({{ {w}, x = 24, y = 64 }})'],
+                                        f'hl.dsp.window.move({{ {w}, x = 12, y = 36 }})'],
                                        capture_output=True, timeout=2)
                         return False
             except Exception:
