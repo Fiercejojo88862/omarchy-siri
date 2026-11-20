@@ -502,6 +502,13 @@ def _with_address(text: str, *, force: str = "", is_start: bool = False) -> str:
         name = _start_honorific()
         return f"{name}, {text}" if name and text else (name or text)
     if is_start:
+        # Avoid "Sir, Hey..." / "Sir, Good morning..." double-addressing.
+        if re.match(
+            r"^(hey|hi|hello|yo|hiya|howdy|good (morning|afternoon|evening|night)|"
+            r"bye|goodbye|see you|thanks|thank you|anytime|no worries|sure thing)\b",
+            text.strip(), re.I,
+        ):
+            return text
         name = _start_honorific()
         return f"{name}, {text}" if name and text else (name or text)
     return text

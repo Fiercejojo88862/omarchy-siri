@@ -96,13 +96,28 @@ fi
 need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not installed" >&2; exit 1; }; }
 
 record_for() {
-    local secs="$1" out="$2"
+    local secs="$1" out="$2" allow_ptt_interrupt="${3:-1}"
     rm -f "$out"
     pw-record --rate=16000 --channels=1 "$out" </dev/null >>"$LOG" 2>&1 &
     local pid=$!
-    sleep "$secs" 2>/dev/null || true
+    local i=0 steps
+    steps=$(awk "BEGIN{printf \"%d\", ($secs/0.1)+0.5}")
+    [[ "$steps" -lt 1 ]] && steps=1
+    while [[ "$i" -lt "$steps" ]]; do
+        # If push-to-talk starts, release mic immediately so PTT hears the user.
+        if [[ "$allow_ptt_interrupt" == "1" && -f "$PTT_PID" ]]; then
+            kill "$pid" 2>/dev/null || true
+            for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.02; done
+            rm -f "$out"
+            return 2
+        fi
+        [[ -f "$STOPFILE" ]] && { kill "$pid" 2>/dev/null || true; break; }
+        sleep 0.1
+        i=$((i + 1))
+    done
     kill "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    return 0
 }
 
 transcribe() {
@@ -198,7 +213,13 @@ run_loop() {
                 continue
             fi
         fi
-        record_for "$WAKE_CHUNK_SECONDS" "$CHUNK"
+        rc=0
+        record_for "$WAKE_CHUNK_SECONDS" "$CHUNK" || rc=$?
+        if [[ "$rc" -eq 2 ]]; then
+            rm -f "$CHUNK"
+            sleep 0.2
+            continue
+        fi
         [[ -f "$STOPFILE" ]] && break
         text=$(transcribe "$CHUNK" "$MODEL")
         [[ -z "$text" ]] && { rm -f "$CHUNK"; continue; }
@@ -227,7 +248,14 @@ run_loop() {
             printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
             notify-send -t 1200 "Ruby" "Yes?" 2>/dev/null || true
             ~/.local/bin/local-voice-say "Yes?" </dev/null >/dev/null 2>&1 &
-            record_for "$WAKE_COMMAND_SECONDS" "$CMDWAV"
+            rc=0
+            record_for "$WAKE_COMMAND_SECONDS" "$CMDWAV" || rc=$?
+            if [[ "$rc" -eq 2 ]]; then
+                rm -f "$CMDWAV"
+                printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
+                sleep 0.2
+                continue
+            fi
             printf '%s' "thinking" > "$RUN/ruby_state" 2>/dev/null || true
             cmd=$(transcribe "$CMDWAV" "$CMD_MODEL" "${WHISPER_THREADS:-4}")
             rm -f "$CMDWAV"

@@ -67,7 +67,7 @@ start_recording() {
     # if already recording, ignore repeat press
     if [[ -f "$PIDFILE" ]]; then
         pid=$(cat "$PIDFILE" 2>/dev/null || true)
-        if kill -0 "$pid" 2>/dev/null; then
+        if [[ "$pid" == "pending" ]] || { [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; }; then
             exit 0
         else
             rm -f "$PIDFILE"
@@ -77,6 +77,8 @@ start_recording() {
     exec 9>"$LOCK" 2>/dev/null || true
     flock -n 9 || exit 0
 
+    # Claim mic early so wake-word listener yields immediately.
+    echo "pending" > "$PIDFILE"
     rm -f "$AUDIOFILE"
     # Signal listening state for top bar indicator.
     printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
@@ -99,8 +101,11 @@ start_recording() {
     # so the press dispatch returns at once — see NOTE above. Plain & keeps
     # $! accurate for PIDFILE (no setsid wrapper in between).
     pw-record --rate=16000 --channels=1 "$AUDIOFILE" </dev/null >>"$LOG" 2>&1 &
-    echo $! > "$PIDFILE"
+    recpid=$!
+    echo "$recpid" > "$PIDFILE"
     disown 2>/dev/null || true
+    # Give the audio pipeline a moment to start so the first word isn't missed.
+    sleep 0.12 2>/dev/null || true
 }
 
 stop_recording() {
