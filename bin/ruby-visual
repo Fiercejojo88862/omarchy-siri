@@ -25,12 +25,21 @@ def main() -> int:
     if cmd == "--daemon":
         # Legacy: overlay daemon removed (avatar is only in Ruby Engine app).
         return 0
-    if cmd == "hide":
-        cmd = "stopped"
-    if cmd not in ("listening", "thinking", "speaking", "stopped"):
-        return 0
     try:
         RUNTIME.mkdir(parents=True, exist_ok=True)
+        if cmd == "hide-speaking":
+            # Don't clobber a newer listening state from a delayed speech hide.
+            try:
+                current = STATE_FILE.read_text().strip()
+            except OSError:
+                current = ""
+            if current == "speaking":
+                STATE_FILE.write_text("stopped")
+            return 0
+        if cmd == "hide":
+            cmd = "stopped"
+        if cmd not in ("listening", "thinking", "speaking", "stopped"):
+            return 0
         STATE_FILE.write_text(cmd)
     except OSError:
         pass

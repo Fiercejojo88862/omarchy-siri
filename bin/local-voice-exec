@@ -623,12 +623,13 @@ def _speak(text: str) -> None:
         )
     except Exception:
         pass
-    # Hide visual after estimated speech duration (TTS is async).
+    # Reset state after estimated speech duration (TTS is async).
     # Rough estimate: ~14 chars/sec at normal rate; clamp 2-12s.
+    # Use hide-speaking so a delayed reset doesn't clobber a new listening state.
     try:
         dur = max(2.0, min(12.0, len(text) / 14.0))
         subprocess.Popen(
-            ["bash", "-c", f'sleep {dur:.1f}; exec "$1" hide',
+            ["bash", "-c", f'sleep {dur:.1f}; exec "$1" hide-speaking',
              "bash", str(Path.home() / ".local/bin/ruby-visual")],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
