@@ -3494,7 +3494,6 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
         q = re.sub(r"\b(and )?(tell me( about it)?|summari[sz]e( it)?|explain( it)?|what (does|do|is|are) (it|that|they) say|what'?s it about|give me (a )?(summary|overview|rundown)).*$", "", m.group(1)).strip(" ?.,")
         q = q or raw.strip()
         _visual("thinking")
-        _popup(_NAME, f"Looking up: {q[:80]}", timeout_ms=4000)
         context = web_lookup(q)
         ans = ask_ai(q, context=context) or "I couldn't find a clear answer right now."
         _touch_interaction()
@@ -3529,7 +3528,6 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
         if not re.search(r"^(what is|what's|who is|who was|what does|what are|explain|tell me about|how does|why does|why is|why are|when was|when is|where is|where was)\b", norm):
             return False
     _visual("thinking")
-    _popup(_NAME, "Thinking…", timeout_ms=3000)
     use_web = bool(re.search(r"\b(latest|news|current|today|right now|recent|price|weather in|who won|score|release|update|version)\b", norm))
     context = web_lookup(raw.strip()) if use_web else ""
     ans = ask_ai(raw.strip(), context=context)

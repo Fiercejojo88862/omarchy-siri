@@ -193,9 +193,7 @@ def run_overlay():
         outer.append(label)
         win.set_child(outer)
 
-        # Position: bottom-right area. As a regular window, we can hint via title
-        # and Hyprland rules; also try to present and let WM place. We'll make it
-        # floating-friendly.
+        # Position: top-left overlay (see position()). Title used by Hyprland rules.
         win.set_title("Ruby Visual")
 
         def apply_state():
@@ -232,7 +230,7 @@ def run_overlay():
         apply_state()
         win.present()
 
-        # Best-effort: float, pin, and move to bottom-right on Hyprland.
+        # Best-effort: float, pin, and move to top-left on Hyprland.
         def position():
             try:
                 r = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True, timeout=2)
@@ -247,8 +245,8 @@ def run_overlay():
                     if addr:
                         subprocess.run(["hyprctl", "dispatch", "setfloating", f"address:{addr}"], capture_output=True, timeout=2)
                         subprocess.run(["hyprctl", "dispatch", "pin", f"address:{addr}"], capture_output=True, timeout=2)
-                        # move to bottom-right with some margin
-                        subprocess.run(["hyprctl", "dispatch", "movewindowpixel", "exact 2280 1120,address:" + addr], capture_output=True, timeout=2)
+                        # move to top-left with margin below typical bar
+                        subprocess.run(["hyprctl", "dispatch", "movewindowpixel", "exact 24 64,address:" + addr], capture_output=True, timeout=2)
                         return False
             except Exception:
                 pass
