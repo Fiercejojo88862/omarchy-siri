@@ -9,10 +9,11 @@ TEXT="${*:-}"
 TEXT="$(echo "$TEXT" | cut -c1-280)"
 
 VOICE_MODEL="$HOME/.local/share/piper/en_GB-southern_english_female-low.onnx"
-# Delivery: speedy + bright + lively. Tune these three to taste.
-RATE=0.85    # piper length-scale: lower = faster (1.0 is model default)
-ENERGY=0.8   # piper noise-scale: higher = more expressive (default 0.667)
-LIFT=1.07    # rubberband pitch lift: higher = brighter, tempo untouched
+# Delivery: clear and measured. Tune these three to taste.
+# VOICE_RATE/VOICE_ENERGY/VOICE_LIFT env vars override defaults.
+RATE="${VOICE_RATE:-1.0}"    # piper length-scale: lower = faster (1.0 is model default)
+ENERGY="${VOICE_ENERGY:-0.8}" # piper noise-scale: higher = more expressive (default 0.667)
+LIFT="${VOICE_LIFT:-1.05}"   # rubberband pitch lift: higher = brighter, tempo untouched
 # Scratch audio in the private runtime dir (0600, gone at logout), not /tmp.
 umask 077
 RUN="${XDG_RUNTIME_DIR:-/tmp}/voice-assistant"
