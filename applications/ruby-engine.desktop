@@ -2,7 +2,7 @@
 Name=Ruby Engine
 Comment=Customize Ruby — voice, personality, cloud brain, and more on Omarchy
 Exec=ruby-engine
-Icon=audio-input-microphone
+Icon=ruby-engine
 Terminal=false
 Type=Application
 Categories=Settings;

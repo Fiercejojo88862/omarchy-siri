@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Ruby visual overlay — shows Ruby's picture with a subtle animation while listening/speaking.
+
+Usage:
+  ruby-visual listening   show listening state (pulsing)
+  ruby-visual thinking    show thinking state
+  ruby-visual speaking    show speaking state
+  ruby-visual hide        hide/close overlay
+
+State is communicated via a small file in XDG_RUNTIME_DIR; the overlay process
+polls it so state changes are instant without restarting.
+"""
+
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "voice-assistant"
+STATE_FILE = RUNTIME / "ruby_visual_state"
+PID_FILE = RUNTIME / "ruby_visual.pid"
+
+# Prefer repo assets, fall back to archive location
+HERE = Path(__file__).resolve().parent.parent
+CANDIDATES = [
+    HERE / "assets" / "ruby-assistant.jpg",
+    Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
+    HERE / "assets" / "ruby-icon.jpg",
+]
+IMAGE_PATH = next((str(p) for p in CANDIDATES if p.exists()), "")
+
+CSS = """
+window, .bg {
+  background: transparent;
+}
+.frame {
+  background: rgba(20, 20, 24, 0.55);
+  border-radius: 9999px;
+  padding: 10px;
+}
+.ring {
+  border-radius: 9999px;
+  padding: 6px;
+}
+.ring.listening {
+  background: rgba(120, 170, 255, 0.85);
+}
+.ring.thinking {
+  background: rgba(255, 200, 120, 0.85);
+}
+.ring.speaking {
+  background: rgba(160, 255, 170, 0.85);
+}
+.pulse1 { opacity: 1.0; }
+.pulse2 { opacity: 0.85; }
+.pulse3 { opacity: 0.7; }
+.avatar {
+  border-radius: 9999px;
+}
+.label {
+  color: white;
+  font-weight: bold;
+  font-size: 13px;
+  margin-top: 6px;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+"""
+
+
+def ensure_runtime():
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(RUNTIME, 0o700)
+    except OSError:
+        pass
+
+
+def read_state():
+    try:
+        return STATE_FILE.read_text().strip()
+    except OSError:
+        return "hide"
+
+
+def write_state(state: str):
+    ensure_runtime()
+    try:
+        STATE_FILE.write_text(state)
+    except OSError:
+        pass
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def running_pid():
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        return pid if pid_alive(pid) else None
+    except Exception:
+        return None
+
+
+def cmd_hide():
+    write_state("hide")
+    pid = running_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def run_overlay():
+    ensure_runtime()
+    try:
+        PID_FILE.write_text(str(os.getpid()))
+    except OSError:
+        pass
+
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    from gi.repository import Gtk, Gdk, GLib
+
+    app = Gtk.Application(application_id="com.omarchy.ruby-visual")
+
+    state = {"mode": read_state() or "listening", "pulse": 0}
+
+    def on_activate(_app):
+        win = Gtk.ApplicationWindow(application=app)
+        win.set_decorated(False)
+        win.set_resizable(False)
+        try:
+            win.set_default_size(220, 260)
+        except Exception:
+            pass
+
+        provider = Gtk.CssProvider()
+        try:
+            provider.load_from_data(CSS.encode("utf-8"))
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(), provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+        except Exception:
+            pass
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        outer.set_halign(Gtk.Align.CENTER)
+        outer.set_valign(Gtk.Align.CENTER)
+        outer.add_css_class("frame")
+
+        ring = Gtk.Box()
+        ring.add_css_class("ring")
+        ring.add_css_class("listening")
+        ring.set_halign(Gtk.Align.CENTER)
+        ring.set_valign(Gtk.Align.CENTER)
+
+        picture = None
+        if IMAGE_PATH and os.path.exists(IMAGE_PATH):
+            try:
+                texture = Gdk.Texture.new_from_filename(IMAGE_PATH)
+                picture = Gtk.Picture.new_for_paintable(texture)
+                picture.set_size_request(160, 160)
+                picture.set_content_fit(Gtk.ContentFit.COVER)
+                picture.add_css_class("avatar")
+                # Try to make it circular-ish via CSS overflow isn't trivial in GTK4;
+                # picture will be square but ring gives nice effect.
+                ring.append(picture)
+            except Exception:
+                picture = None
+        if picture is None:
+            lbl = Gtk.Label(label="Ruby")
+            lbl.set_size_request(160, 160)
+            ring.append(lbl)
+
+        label = Gtk.Label(label="Listening…")
+        label.add_css_class("label")
+
+        outer.append(ring)
+        outer.append(label)
+        win.set_child(outer)
+
+        # Position: bottom-right area. As a regular window, we can hint via title
+        # and Hyprland rules; also try to present and let WM place. We'll make it
+        # floating-friendly.
+        win.set_title("Ruby Visual")
+
+        def apply_state():
+            mode = state["mode"]
+            for c in ("listening", "thinking", "speaking"):
+                ring.remove_css_class(c)
+            ring.add_css_class(mode if mode in ("listening", "thinking", "speaking") else "listening")
+            if mode == "listening":
+                label.set_text("Listening…")
+            elif mode == "thinking":
+                label.set_text("Thinking…")
+            elif mode == "speaking":
+                label.set_text("Speaking…")
+            else:
+                label.set_text("Ruby")
+
+        def tick():
+            # poll state file
+            new = read_state()
+            if new == "hide":
+                win.close()
+                app.quit()
+                return False
+            if new in ("listening", "thinking", "speaking") and new != state["mode"]:
+                state["mode"] = new
+                apply_state()
+            # pulse animation by toggling opacity classes
+            state["pulse"] = (state["pulse"] + 1) % 3
+            for c in ("pulse1", "pulse2", "pulse3"):
+                ring.remove_css_class(c)
+            ring.add_css_class(["pulse1", "pulse2", "pulse3"][state["pulse"]])
+            return True
+
+        apply_state()
+        win.present()
+
+        # Best-effort: float, pin, and move to bottom-right on Hyprland.
+        def position():
+            try:
+                r = subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True, timeout=2)
+                if r.returncode == 0:
+                    import json as _json
+                    clients = _json.loads(r.stdout or "[]")
+                    addr = None
+                    for c in clients:
+                        if c.get("title") == "Ruby Visual":
+                            addr = c.get("address")
+                            break
+                    if addr:
+                        subprocess.run(["hyprctl", "dispatch", "setfloating", f"address:{addr}"], capture_output=True, timeout=2)
+                        subprocess.run(["hyprctl", "dispatch", "pin", f"address:{addr}"], capture_output=True, timeout=2)
+                        # move to bottom-right with some margin
+                        subprocess.run(["hyprctl", "dispatch", "movewindowpixel", "exact 2280 1120,address:" + addr], capture_output=True, timeout=2)
+                        return False
+            except Exception:
+                pass
+            return True  # retry until found
+        GLib.timeout_add(150, position)
+        GLib.timeout_add(350, tick)
+
+        def on_close(*_):
+            try:
+                PID_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+        win.connect("close-request", on_close)
+
+    app.connect("activate", on_activate)
+    try:
+        app.run([])
+    finally:
+        try:
+            if running_pid() == os.getpid():
+                PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: ruby-visual {listening|thinking|speaking|hide}", file=sys.stderr)
+        return 2
+    cmd = sys.argv[1].strip().lower()
+    if cmd == "hide":
+        cmd_hide()
+        return 0
+    if cmd not in ("listening", "thinking", "speaking"):
+        print("unknown state", file=sys.stderr)
+        return 2
+
+    ensure_runtime()
+    write_state(cmd)
+    pid = running_pid()
+    if pid:
+        return 0  # daemon will pick up state
+
+    # spawn daemon
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--daemon"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--daemon":
+        # run overlay loop
+        run_overlay()
+        sys.exit(0)
+    sys.exit(main())

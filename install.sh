@@ -20,7 +20,7 @@ done
 # --- 1. Scripts -----------------------------------------------------------------
 mkdir -p "$BIN"
 for f in local-voice local-voice-exec local-voice-tts local-voice-say \
-         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon ruby-engine; do
+         local-voice-translate local-voice-calendar apple-calendar apple-calendar-set-icon ruby-engine ruby-visual; do
     ln -sf "$REPO/bin/$f" "$BIN/$f"
     chmod +x "$REPO/bin/$f"
 done
@@ -65,7 +65,7 @@ done
 chmod 600 "$CONF"/*.conf 2>/dev/null || true
 info "Config templates in $CONF (calendar, persona, weather, translation, cloud, voice)."
 
-# --- 6. Desktop entries ---------------------------------------------------
+# --- 6. Desktop entries + icons ---------------------------------------------------
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/apple-calendar.desktop" <<EOF
 [Desktop Entry]
@@ -83,15 +83,24 @@ cat > "$HOME/.local/share/applications/ruby-engine.desktop" <<EOF
 Name=Ruby Engine
 Comment=Customize Ruby — voice, personality, cloud brain, and more on Omarchy
 Exec=$BIN/ruby-engine
-Icon=audio-input-microphone
+Icon=ruby-engine
 Terminal=false
 Type=Application
 Categories=Settings;
 Keywords=ruby;voice;assistant;omarchy;siri;tts;ai;personality;
 StartupNotify=true
 EOF
+for sz in 512 256 128 64; do
+    src="$REPO/icons/hicolor/${sz}x${sz}/apps/ruby-engine.png"
+    dst="$HOME/.local/share/icons/hicolor/${sz}x${sz}/apps"
+    if [[ -f "$src" ]]; then
+        mkdir -p "$dst"
+        cp -f "$src" "$dst/"
+    fi
+done
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-info "Desktop entries installed (Apple Calendar, Ruby Engine)."
+info "Desktop entries and Ruby icons installed (Apple Calendar, Ruby Engine)."
 
 # --- 7. Hyprland keybinding --------------------------------------------------------------
 info "Add this line to ~/.config/hypr/bindings.lua, then: hyprctl reload"

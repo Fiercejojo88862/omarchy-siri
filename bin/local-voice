@@ -48,7 +48,14 @@ start_recording() {
 
     rm -f "$AUDIOFILE"
     # notify instantly, no delay
-    notify-send -t 800 "Voice" "Listening — press INS again to send..." 2>/dev/null || true
+    RUBY_IMG="$HOME/omarchy-siri/assets/ruby-assistant.jpg"
+    [[ -f "$RUBY_IMG" ]] || RUBY_IMG="$HOME/Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg"
+    if command -v omarchy-notification-send >/dev/null 2>&1 && [[ -f "$RUBY_IMG" ]]; then
+        omarchy-notification-send -u low -t 1200 --image "$RUBY_IMG" "Ruby" "Listening — press INS again to send..." 2>/dev/null || true
+    else
+        notify-send -t 800 "Ruby" "Listening — press INS again to send..." 2>/dev/null || true
+    fi
+    [[ -x "$HOME/.local/bin/ruby-visual" ]] && "$HOME/.local/bin/ruby-visual" listening </dev/null >/dev/null 2>&1 || true
     # 16k mono is what base.en expects; wav file. Detached fds ($LOG, /dev/null)
     # so the press dispatch returns at once — see NOTE above. Plain & keeps
     # $! accurate for PIDFILE (no setsid wrapper in between).
@@ -65,7 +72,8 @@ stop_recording() {
     pid=$(cat "$PIDFILE" 2>/dev/null || true)
     rm -f "$PIDFILE"
     # Immediate feedback on release — confirms stop before any processing delay
-    notify-send -t 1000 "Voice" "Stopped listening — processing..." 2>/dev/null || true
+    [[ -x "$HOME/.local/bin/ruby-visual" ]] && "$HOME/.local/bin/ruby-visual" thinking </dev/null >/dev/null 2>&1 || true
+    notify-send -t 1000 "Ruby" "Processing..." 2>/dev/null || true
     # Grace period: let pw-record capture the tail end of speech so the last
     # word/syllable isn't cut off when you press Insert while finishing a sentence.
     # Configurable via voice.conf or VOICE_STOP_GRACE env; default 0.3s.
@@ -85,7 +93,8 @@ stop_recording() {
         for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
         # ensure file exists and has data (> 1KB)
         if [[ ! -f "$AUDIOFILE" ]] || [[ $(stat -c%s "$AUDIOFILE" 2>/dev/null || echo 0) -lt 1500 ]]; then
-            notify-send -t 1500 "Voice" "Too short" 2>/dev/null || true
+            [[ -x "$HOME/.local/bin/ruby-visual" ]] && "$HOME/.local/bin/ruby-visual" hide </dev/null >/dev/null 2>&1 || true
+            notify-send -t 1500 "Ruby" "Too short" 2>/dev/null || true
             rm -f "$AUDIOFILE"
             exit 0
         fi
@@ -101,11 +110,12 @@ stop_recording() {
         if [[ -z "$TEXT" ]]; then
             # No speech heard — music may be playing instead. Fall through to
             # Shazam automatically (records its own fresh sample in exec).
-            notify-send -t 1500 "Voice" "No speech — listening for music..." 2>/dev/null || true
+            [[ -x "$HOME/.local/bin/ruby-visual" ]] && "$HOME/.local/bin/ruby-visual" hide </dev/null >/dev/null 2>&1 || true
+            notify-send -t 1500 "Ruby" "No speech — listening for music..." 2>/dev/null || true
             exec ~/.local/bin/local-voice-exec "shazam this"
         fi
         # show what was heard for 1s, then dispatch
-        notify-send -t 1200 "Voice" "Heard: $TEXT" 2>/dev/null || true
+        notify-send -t 1200 "Ruby" "Heard: $TEXT" 2>/dev/null || true
         exec ~/.local/bin/local-voice-exec "$TEXT"
     ) </dev/null >>"$LOG" 2>&1 &
     disown 2>/dev/null || true

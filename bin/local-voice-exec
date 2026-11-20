@@ -474,16 +474,52 @@ def _with_address(text: str, *, force: str = "", is_start: bool = False) -> str:
     return text
 
 
+# Ruby images for notifications/overlay (repo assets preferred).
+_HERE = Path(__file__).resolve().parent.parent
+_RUBY_IMAGE = next((str(p) for p in (
+    _HERE / "assets" / "ruby-assistant.jpg",
+    Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg",
+) if p.exists()), "")
+_RUBY_ICON = next((str(p) for p in (
+    _HERE / "icons" / "hicolor" / "512x512" / "apps" / "ruby-engine.png",
+    _HERE / "assets" / "ruby-icon.jpg",
+    Path.home() / "Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Menu Bar Icon.jpg",
+) if p.exists()), "")
+
+
+def _visual(state: str) -> None:
+    """Best-effort Ruby visual overlay (listening/thinking/speaking/hide)."""
+    if REHEARSAL or os.environ.get("VOICE_DRYRUN"):
+        return
+    helper = Path.home() / ".local/bin/ruby-visual"
+    if not helper.exists():
+        helper = Path(__file__).resolve().parent / "ruby-visual"
+    if not helper.exists():
+        return
+    try:
+        subprocess.Popen([str(helper), state], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:
+        pass
+
+
 def _popup(headline: str, body: str = "", glyph: str = "", timeout_ms: int = 8000) -> None:
     """Written response in a popup. Prefers omarchy-notification-send, falls back to notify-send."""
     if os.environ.get("VOICE_ECHO"):
         print(f"POPUP\t{headline}\t{body}")
     if os.environ.get("VOICE_DRYRUN"):
         return
+    # Show Ruby's image for her own responses.
+    image = _RUBY_IMAGE if headline == _NAME and _RUBY_IMAGE else ""
     if shutil.which("omarchy-notification-send"):
         cmd = ["omarchy-notification-send", "-u", "low", "-t", str(timeout_ms)]
         if glyph:
             cmd += ["-g", glyph]
+        if image:
+            cmd += ["--image", image]
+        elif _RUBY_ICON and headline == _NAME:
+            cmd += ["-i", _RUBY_ICON]
         cmd += [headline]
         if body:
             cmd += [body]
@@ -492,7 +528,12 @@ def _popup(headline: str, body: str = "", glyph: str = "", timeout_ms: int = 800
             return
         except Exception:
             pass
-    args = ["notify-send", "-t", str(timeout_ms), headline]
+    args = ["notify-send", "-t", str(timeout_ms)]
+    if image:
+        args += ["-i", image]
+    elif _RUBY_ICON and headline == _NAME:
+        args += ["-i", _RUBY_ICON]
+    args += [headline]
     if body:
         args.append(body)
     subprocess.run(args, check=False)
@@ -567,18 +608,33 @@ def _clear_quiet() -> None:
 def _speak(text: str) -> None:
     # Quiet mode: popups confirm silently, TTS stays muted.
     if _quiet_active():
+        _visual("hide")
         return
     # VOICE_ECHO prints what would be said (used by --selftest and benchmarks);
     # VOICE_DRYRUN additionally stops the audio so tests stay silent.
     if os.environ.get("VOICE_ECHO"):
         print(f"SPEAK\t{text}")
     if os.environ.get("VOICE_DRYRUN"):
+        _visual("hide")
         return
+    _visual("speaking")
     # Via local-voice-say (Piper, offline, sub-second). Fire-and-forget: the
     # player is detached so synthesis never blocks the router or Hyprland.
     try:
         subprocess.Popen(
             [str(Path.home() / ".local/bin/local-voice-say"), text],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except Exception:
+        pass
+    # Hide visual after estimated speech duration (TTS is async).
+    # Rough estimate: ~14 chars/sec at normal rate; clamp 2-12s.
+    try:
+        dur = max(2.0, min(12.0, len(text) / 14.0))
+        subprocess.Popen(
+            ["bash", "-c", f'sleep {dur:.1f}; exec "$1" hide',
+             "bash", str(Path.home() / ".local/bin/ruby-visual")],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -3437,6 +3493,7 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
     if m and wants_summary:
         q = re.sub(r"\b(and )?(tell me( about it)?|summari[sz]e( it)?|explain( it)?|what (does|do|is|are) (it|that|they) say|what'?s it about|give me (a )?(summary|overview|rundown)).*$", "", m.group(1)).strip(" ?.,")
         q = q or raw.strip()
+        _visual("thinking")
         _popup(_NAME, f"Looking up: {q[:80]}", timeout_ms=4000)
         context = web_lookup(q)
         ans = ask_ai(q, context=context) or "I couldn't find a clear answer right now."
@@ -3471,11 +3528,13 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
         # "how do I open..." / "what is the command..." are fine as questions
         if not re.search(r"^(what is|what's|who is|who was|what does|what are|explain|tell me about|how does|why does|why is|why are|when was|when is|where is|where was)\b", norm):
             return False
+    _visual("thinking")
     _popup(_NAME, "Thinking…", timeout_ms=3000)
     use_web = bool(re.search(r"\b(latest|news|current|today|right now|recent|price|weather in|who won|score|release|update|version)\b", norm))
     context = web_lookup(raw.strip()) if use_web else ""
     ans = ask_ai(raw.strip(), context=context)
     if not ans:
+        _visual("hide")
         return False
     _touch_interaction()
     _popup(_NAME, ans[:900], timeout_ms=12000)
