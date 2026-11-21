@@ -192,10 +192,12 @@ def ask_vision(prompt: str, image_path: Path) -> tuple[str | None, str | None]:
     data_url = "data:image/jpeg;base64," + b64
 
     cloud = _cloud_conf()
+    cloud_err = None
     if cloud["enabled"] and cloud["key"]:
         url = cloud["base_url"] + "/chat/completions"
+        cloud_model = cloud.get("model") or "llama-3.2-11b-vision-preview"
         payload = {
-            "model": cloud.get("model") or "llama-3.2-11b-vision-preview",
+            "model": cloud_model,
             "messages": [
                 {"role": "system", "content": "You are Ruby, a helpful voice assistant. Describe what you see or answer the user's question about the screen clearly in 2-5 short sentences for speech. No markdown, no bullet lists, no URLs."},
                 {"role": "user", "content": [
@@ -216,8 +218,11 @@ def ask_vision(prompt: str, image_path: Path) -> tuple[str | None, str | None]:
             text = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
             if text:
                 return _speakable(text), None
-        except Exception:
-            pass
+            cloud_err = f"cloud vision model '{cloud_model}' returned no answer"
+        except urllib.error.HTTPError as e:
+            cloud_err = f"cloud vision model '{cloud_model}' unavailable (HTTP {getattr(e, 'code', '?')})"
+        except Exception as e:
+            cloud_err = f"cloud vision error: {e}"
         # fall through to local
 
     model = _local_vision_model()
@@ -239,9 +244,17 @@ def ask_vision(prompt: str, image_path: Path) -> tuple[str | None, str | None]:
         text = (data.get("message", {}).get("content") or "").strip()
         if text:
             return _speakable(text), None
+        local_err = f"local vision model '{model}' returned no answer"
+    except urllib.error.HTTPError as e:
+        if getattr(e, "code", None) == 404:
+            local_err = f"local vision model '{model}' not found (pull a vision model, e.g. llava or qwen2.5vl)"
+        else:
+            local_err = f"local vision model '{model}' HTTP {getattr(e, 'code', '?')}"
     except Exception as e:
-        return None, str(e)[:120]
-    return None, "no vision answer"
+        local_err = str(e)[:120]
+    if cloud_err and local_err:
+        return None, f"{cloud_err}; {local_err}"[:180]
+    return None, (local_err or cloud_err or "no vision answer")
 
 
 def main():
