@@ -82,6 +82,22 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_memory",
+            "description": "Search the user's saved notes and auto-tagged logs (gym, car, money, school) for relevant past entries. Use for questions like when something was last logged or to summarize recent logs/notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language search query."},
+                    "limit": {"type": "integer", "description": "Max results (1-10).", "default": 5},
+                    "tag": {"type": "string", "description": "Optional tag filter: #gym, #car, #money, #school."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_calendar",
             "description": "Get calendar/schedule information from iCloud calendar integration.",
             "parameters": {
@@ -239,6 +255,22 @@ TOOLS = [
 
 
 # ---- Tool implementations (best-effort, safe, local-first) ----
+
+
+def tool_search_memory(args):
+    try:
+        import ruby_memory as memory
+        memory.init_db(); memory.migrate_legacy_notes()
+        q = args.get("query", "")
+        limit = int(args.get("limit", 5) or 5)
+        tag = (args.get("tag") or "").strip()
+        if tag and not tag.startswith("#"):
+            tag = "#" + tag
+        results = memory.search_memory((tag + " " + q).strip() if tag else q, limit=max(1, min(limit, 10)))
+        return {"ok": True, "results": results, "text": memory.format_entries(results, limit)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
 
 
 def tool_get_calendar(args):
@@ -620,6 +652,7 @@ def _validate_tool_call(name, args):
 
 
 TOOL_IMPL = {
+    "search_memory": tool_search_memory,
     "get_calendar": tool_get_calendar,
     "get_canvas": tool_get_canvas,
     "get_weather": tool_get_weather,

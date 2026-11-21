@@ -61,6 +61,13 @@ except OSError:
 
 CONFIG_DIR = Path.home() / ".config/voice-assistant"
 CONFIG_EXAMPLES = Path(__file__).resolve().parent.parent / "config"
+_BIN_DIR = Path(__file__).resolve().parent
+if str(_BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_BIN_DIR))
+try:
+    import ruby_memory as memory  # type: ignore
+except Exception:
+    memory = None
 
 # --- rehearsal: route for real, touch nothing ---------------------------------
 # VOICE_REHEARSAL=1 makes the router decide exactly as it normally would while
@@ -402,6 +409,40 @@ XDG_APP_DIRS = (
 #   HONORIFIC_ON_ERRORS=1
 # Default when unconfigured: name "Ruby", honorific "Sir", 180s, on.
 STATE_DIR = Path.home() / ".local/state/voice-assistant"
+SHARE_DIR = Path.home() / ".local/share/voice-assistant"
+TRANSCRIPT_LOG = SHARE_DIR / "transcript.jsonl"
+
+_TRANSCRIPT = {"heard": "", "matched_intent": "", "tool_calls": [], "response": "", "route": ""}
+
+def _transcript_set(**fields):
+    try:
+        for k, v in fields.items():
+            if k == "tool_calls" and isinstance(v, list):
+                _TRANSCRIPT["tool_calls"] = v
+            elif k in _TRANSCRIPT:
+                _TRANSCRIPT[k] = v
+    except Exception:
+        pass
+
+def _log_transcript():
+    try:
+        SHARE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            SHARE_DIR.chmod(0o700)
+        except Exception:
+            pass
+        rec = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "heard": (_TRANSCRIPT.get("heard") or "")[:2000],
+            "matched_intent": (_TRANSCRIPT.get("matched_intent") or "")[:200],
+            "route": (_TRANSCRIPT.get("route") or "")[:100],
+            "tool_calls": _TRANSCRIPT.get("tool_calls") or [],
+            "response": (_TRANSCRIPT.get("response") or "")[:2000],
+        }
+        with TRANSCRIPT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 PERSONA_CONF = CONFIG_DIR / "persona.conf"
 LAST_FILE = STATE_DIR / "last_interaction"
 _DEFAULT_NAME = "Ruby"
@@ -684,11 +725,19 @@ def _confirm(notify: str, *, glyph: str = "", timeout_ms: int = 6000) -> None:
     """Every response is written in a popup AND spoken. Honorific only at start."""
     if not notify:
         return
+    try:
+        _TRANSCRIPT["response"] = notify
+    except Exception:
+        pass
     is_start = _is_conversation_start()
     spoken = _with_address(notify, is_start=is_start)
     _touch_interaction()
     _popup(_NAME, spoken, glyph=glyph, timeout_ms=timeout_ms)
     _speak(spoken)
+    try:
+        _log_transcript()
+    except Exception:
+        pass
 
 
 def _launch_binary(binary: str) -> bool:
@@ -2068,14 +2117,14 @@ def _handle_timers(norm: str) -> bool:
     return False
 
 
-# --- notes: quick spoken notebook -------------------------------------------
-NOTES_FILE = STATE_DIR / "notes.md"
+# --- notes & logs: SQLite-backed memory (with legacy migration) ---------------
+NOTES_FILE = STATE_DIR / "notes.md"  # legacy path (migrated automatically)
 
 # "log chest day" / "log oil change" / "log 12 bucks" auto-tag the entry.
 _LOG_TAGS = (
     ("#gym", r"\b(gym|workout|chest|back day|leg day|legs|shoulder|arm day|cardio|run|ran|jog|scooter ride|crunch)\b"),
-    ("#car", r"\b(oil|tire|tyre|brake|mini|mercedes|gl450|clubman|repair|mechanic|inspection|alignment)\b"),
-    ("#money", r"\$|\b(dollar|dollars|bucks|spent|paid|cost|chipotle|groceries|gas)\b"),
+    ("#car", r"\b(oil|tire|tyre|brake|mini|mercedes|gl450|clubman|repair|mechanic|inspection|alignment|gas|fuel|odometer|miles)\b"),
+    ("#money", r"\$|\b(dollar|dollars|bucks|spent|paid|cost|chipotle|groceries)\b"),
     ("#school", r"\b(exam|quiz|class|homework|assignment|study|studied|njit|it20[12]|lecture|lab)\b"),
 )
 
@@ -2083,46 +2132,185 @@ _LOG_TAGS = (
 def _log_tag(norm: str) -> str:
     for tag, pat in _LOG_TAGS:
         if re.search(pat, norm):
-            return tag + " "
+            return tag
     return ""
+
+
+def _memory_ensure():
+    if memory is None:
+        return
+    try:
+        memory.init_db()
+        memory.migrate_legacy_notes()
+    except Exception:
+        pass
+
+
+def _memory_add(content: str, tag: str = "", source: str = "note") -> bool:
+    if memory is not None:
+        try:
+            _memory_ensure()
+            memory.add_entry(content, tag=tag, source=source)
+            return True
+        except Exception:
+            pass
+    # Fallback to legacy markdown.
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tagp = (tag + " ") if tag else ""
+        with NOTES_FILE.open("a") as f:
+            f.write(f"- [{datetime.now():%Y-%m-%d %H:%M}] {tagp}{content}\n")
+        return True
+    except OSError:
+        return False
+
+
+def _memory_recent(tag: str | None = None, limit: int = 10):
+    if memory is not None:
+        try:
+            _memory_ensure()
+            return memory.recent_entries(tag=tag, limit=limit)
+        except Exception:
+            pass
+    try:
+        lines = [l.strip() for l in NOTES_FILE.read_text().splitlines() if l.strip()]
+        out = []
+        for line in reversed(lines):
+            m = re.match(r"^-\s*\[(?P<ts>[^\]]+)\]\s*(?P<body>.+)$", line)
+            if not m:
+                continue
+            ts, body = m.group("ts"), m.group("body")
+            etag = ""
+            mt = re.match(r"^(#\w+)\s+(.*)$", body)
+            if mt:
+                etag, body = mt.group(1), mt.group(2)
+            if tag and etag != tag:
+                continue
+            out.append({"timestamp": ts, "tag": etag, "content": body})
+            if len(out) >= limit:
+                break
+        return out
+    except OSError:
+        return []
+
+
+def _memory_clear(tag: str | None = None) -> bool:
+    ok = False
+    if memory is not None:
+        try:
+            _memory_ensure()
+            memory.clear_entries(tag=tag)
+            ok = True
+        except Exception:
+            ok = False
+    try:
+        if tag is None:
+            NOTES_FILE.unlink(missing_ok=True)
+        else:
+            # Best-effort legacy tag clear.
+            if NOTES_FILE.is_file():
+                kept = []
+                for line in NOTES_FILE.read_text().splitlines():
+                    if tag in line:
+                        continue
+                    kept.append(line)
+                NOTES_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
+        ok = True
+    except OSError:
+        pass
+    return ok
+
+
+def _search_memory_tool(query: str, limit: int = 5):
+    """Return relevant memory entries (for natural questions and LLM tools)."""
+    if memory is None:
+        return []
+    try:
+        _memory_ensure()
+        return memory.search_memory(query, limit=max(1, min(limit, 10)))
+    except Exception:
+        return []
+
+
+def _handle_memory_query(norm: str, raw: str) -> bool:
+    """Natural questions over notes/logs (semantic search + LLM summary)."""
+    # Let explicit "show/read/list my notes" and "show gym logs" be handled by _handle_notes.
+    if re.search(r"\b(show|read|list|what are)( my)? notes?\b", norm):
+        return False
+    if re.search(r"\bshow\b.{0,15}\b(gym|car|money|school)\b.{0,10}\b(logs?|notes?|entries)\b|"
+                 r"\b(gym|car|money|school)\b.{0,10}\b(logs?)\b", norm):
+        return False
+    if not re.search(r"\b(note|notes|log|logs|logged|journal|diary)\b", norm):
+        return False
+    if not re.search(r"\b(when|last|recent|summari[sz]e|search|find|what did i|did i|have i|any|about|how many)\b", norm):
+        return False
+    # Build query biased by tag keywords when present.
+    q = raw.strip()
+    tag = _log_tag(norm)
+    if tag:
+        q = f"{tag} {q}"
+    results = _search_memory_tool(q, limit=5)
+    if not results:
+        # Try recent entries by tag as fallback.
+        if tag:
+            results = _memory_recent(tag=tag, limit=5)
+    if not results:
+        _confirm("I couldn't find matching notes or logs.")
+        return True
+    context = memory.format_entries(results, max_items=5) if memory else "\n".join(
+        f"- [{r.get('timestamp','')}] {r.get('tag','')} {r.get('content','')}".strip() for r in results[:5]
+    )
+    question = raw.strip()
+    prompt = (
+        "Answer the user's question using only these saved notes/logs. "
+        "If the answer is not in them, say so briefly.\n\n"
+        f"Notes/logs:\n{context}\n\nQuestion: {question}"
+    )
+    history = _load_chat_history()
+    ans = ask_ai(prompt, history=history) or "I found matching notes, but couldn't summarize them clearly."
+    _save_chat_turn(raw.strip(), ans)
+    _touch_interaction()
+    _popup("Memory", (context[:600] + ("\n\n" + ans[:400] if ans else ""))[:900], timeout_ms=12000)
+    _speak(_with_address(ans, is_start=_is_conversation_start()))
+    _touch_interaction()
+    return True
 
 
 def _handle_notes(norm: str) -> bool:
     if re.search(r"\b(clear|delete|forget)( my| all)? notes?\b", norm):
-        try:
-            NOTES_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _memory_clear(None)
         _confirm("Notes cleared.")
         return True
     m = re.search(r"^(?:please\s+)?log\s+(.+?)[.! ]*$", norm)
     if m and m.group(1).strip() not in ("out", "in", "off", "on"):
         text = m.group(1).strip()[:240]
         if text:
-            try:
-                STATE_DIR.mkdir(parents=True, exist_ok=True)
-                with NOTES_FILE.open("a") as f:
-                    f.write(f"- [{datetime.now():%Y-%m-%d %H:%M}] {_log_tag(norm)}{text}\n")
-            except OSError:
-                pass
+            tag = _log_tag(norm)
+            _memory_add(text, tag=tag, source="log")
             _confirm("Logged.")
             return True
     m = re.search(r"\bshow\b.{0,15}\b(gym|car|money|school)\b.{0,10}\b(logs?|notes?|entries)\b|"
                   r"\b(gym|car|money|school)\b.{0,10}\b(logs?)\b", norm)
     if m:
         tag = "#" + next(g for g in m.groups() if g)
-        try:
-            lines = [l.strip() for l in NOTES_FILE.read_text().splitlines()
-                     if l.strip() and tag in l]
-        except OSError:
-            lines = []
-        if not lines:
+        entries = _memory_recent(tag=tag, limit=50)
+        if not entries:
             _confirm(f"No {tag[1:]} entries yet.")
             return True
-        body = "\n".join(lines[-8:])
+        # Show most recent 8 in chronological-ish display (oldest of those at top).
+        show = list(reversed(entries[:8]))
+        body_lines = []
+        for e in show:
+            ts = e.get("timestamp", "")
+            t = e.get("tag", "")
+            c = e.get("content", "")
+            body_lines.append(f"- [{ts}] {t} {c}".strip() if ts else f"- {t} {c}".strip())
+        body = "\n".join(body_lines)
+        latest = entries[0]
+        latest_text = f"{latest.get('tag','')} {latest.get('content','')}".strip()
         _touch_interaction()
         _popup(f"{tag} log", body, timeout_ms=9000)
-        _speak(_with_address(f"{len(lines)} {tag[1:]} entries. Latest: {lines[-1][-120:]}.",
+        _speak(_with_address(f"{len(entries)} {tag[1:]} entries. Latest: {latest_text[-120:]}.",
                              is_start=_is_conversation_start()))
         _touch_interaction()
         return True
@@ -2132,87 +2320,33 @@ def _handle_notes(norm: str) -> bool:
         text = (text or "").strip()[:240]
         if not text:
             return False
-        try:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            with NOTES_FILE.open("a") as f:
-                f.write(f"- [{datetime.now():%Y-%m-%d %H:%M}] {text}\n")
-        except OSError:
-            pass
+        _memory_add(text, tag="", source="note")
         _confirm("Noted.")
         return True
     if re.search(r"\b(show|read|list|what are)( my)? notes?\b", norm):
-        try:
-            lines = [l.strip() for l in NOTES_FILE.read_text().splitlines() if l.strip()]
-        except OSError:
-            lines = []
-        if not lines:
+        entries = _memory_recent(tag=None, limit=50)
+        if not entries:
             _confirm("No notes yet.")
             return True
-        body = "\n".join(lines[-8:])
+        show = list(reversed(entries[:8]))
+        body_lines = []
+        for e in show:
+            ts = e.get("timestamp", "")
+            t = e.get("tag", "")
+            c = e.get("content", "")
+            body_lines.append(f"- [{ts}] {t} {c}".strip() if ts else f"- {t} {c}".strip())
+        body = "\n".join(body_lines)
+        latest = entries[0]
+        latest_text = re.sub(r"^\s*", "", f"{latest.get('content','')}").strip()[:120]
+        extra = f" Plus {len(entries) - 1} more." if len(entries) > 1 else ""
         _touch_interaction()
         _popup("Notes", body, timeout_ms=9000)
-        latest = re.sub(r"^-\s*\[.*?\]\s*", "", lines[-1])[:120]
-        extra = f" Plus {len(lines) - 1} more." if len(lines) > 1 else ""
-        _speak(_with_address(f"{len(lines)} note{'s' if len(lines) != 1 else ''}. Latest: {latest}.{extra}",
+        _speak(_with_address(f"{len(entries)} note{'s' if len(entries) != 1 else ''}. Latest: {latest_text}.{extra}",
                              is_start=_is_conversation_start()))
         _touch_interaction()
         return True
     return False
 
-
-# --- answers: safe local calculator + conversions, spell-out ------------------
-import ast as _ast
-
-_CONVERT = {
-    # (from-names, to-name, factor|func) — factor multiplies, func maps value.
-    "fahrenheit": (("fahrenheit", "fahrenheits", "f"), "celsius", lambda v: (v - 32) * 5 / 9),
-    "celsius": (("celsius", "c"), "fahrenheit", lambda v: v * 9 / 5 + 32),
-    "miles": (("miles", "mile", "mi"), "kilometers", 1.60934),
-    "kilometers": (("kilometers", "kilometer", "km", "kms"), "miles", 1 / 1.60934),
-    "feet": (("feet", "foot", "ft"), "meters", 0.3048),
-    "meters": (("meters", "meter", "m"), "feet", 3.28084),
-    "inches": (("inches", "inch", "in"), "centimeters", 2.54),
-    "centimeters": (("centimeters", "centimeter", "cm"), "inches", 1 / 2.54),
-    "pounds": (("pounds", "pound", "lbs", "lb"), "kilograms", 0.453592),
-    "kilograms": (("kilograms", "kilogram", "kg"), "pounds", 2.20462),
-    "ounces": (("ounces", "ounce", "oz"), "grams", 28.3495),
-    "grams": (("grams", "gram", "g"), "ounces", 1 / 28.3495),
-    "gallons": (("gallons", "gallon", "gal"), "liters", 3.78541),
-    "liters": (("liters", "liter", "l"), "gallons", 1 / 3.78541),
-    "mph": (("mph", "miles per hour"), "kmh", 1.60934),
-    "kmh": (("kmh", "kph", "kilometers per hour"), "mph", 1 / 1.60934),
-}
-_UNIT_ALIASES: dict[str, str] = {}
-for _canon, (_names, _to, _fn) in _CONVERT.items():
-    for _n in _names:
-        _UNIT_ALIASES[_n] = _canon
-
-
-def _num_fmt(v: float) -> str:
-    if abs(v - round(v)) < 1e-9:
-        return str(int(round(v)))
-    return f"{v:.2f}".rstrip("0").rstrip(".")
-
-
-def _safe_eval(expr: str) -> float | None:
-    """Arithmetic only: numbers, +-*/%**(), unary minus. No names, no calls."""
-    try:
-        tree = _ast.parse(expr, mode="eval")
-    except SyntaxError:
-        return None
-    allowed = (_ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Constant,
-               _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.Mod, _ast.Pow,
-               _ast.USub, _ast.UAdd, _ast.FloorDiv)
-    for node in _ast.walk(tree):
-        if not isinstance(node, allowed):
-            return None
-        if isinstance(node, _ast.Constant) and not isinstance(node.value, (int, float)):
-            return None
-    try:
-        val = eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, {})  # noqa: S307
-    except Exception:
-        return None
-    return float(val) if isinstance(val, (int, float)) else None
 
 
 def _handle_calc(norm: str) -> bool:
@@ -2835,6 +2969,28 @@ def _computer_do(target: str, prompt: str) -> str:
     if try_task_intent(prompt):
         return ""
     return "I didn't catch that computer action, Sir."
+
+
+# --- world clock: time in another city ---------------------------------------
+CITY_TZ = {
+    "tokyo": "Asia/Tokyo", "london": "Europe/London", "paris": "Europe/Paris",
+    "berlin": "Europe/Berlin", "rome": "Europe/Rome", "madrid": "Europe/Madrid",
+    "amsterdam": "Europe/Amsterdam", "zurich": "Europe/Zurich", "moscow": "Europe/Moscow",
+    "cairo": "Africa/Cairo", "dubai": "Asia/Dubai", "mumbai": "Asia/Kolkata",
+    "delhi": "Asia/Kolkata", "beijing": "Asia/Shanghai", "shanghai": "Asia/Shanghai",
+    "hong kong": "Asia/Hong_Kong", "singapore": "Asia/Singapore", "seoul": "Asia/Seoul",
+    "sydney": "Australia/Sydney", "auckland": "Pacific/Auckland",
+    "new york": "America/New_York", "boston": "America/New_York", "miami": "America/New_York",
+    "atlanta": "America/New_York", "toronto": "America/Toronto", "chicago": "America/Chicago",
+    "dallas": "America/Chicago", "denver": "America/Denver", "los angeles": "America/Los_Angeles",
+    "san francisco": "America/Los_Angeles", "seattle": "America/Los_Angeles",
+    "vancouver": "America/Vancouver", "mexico city": "America/Mexico_City",
+    "rio": "America/Sao_Paulo", "sao paulo": "America/Sao_Paulo", "buenos aires": "America/Argentina/Buenos_Aires",
+    "honolulu": "Pacific/Honolulu", "johannesburg": "Africa/Johannesburg",
+    "nairobi": "Africa/Nairobi", "istanbul": "Europe/Istanbul", "athens": "Europe/Athens",
+    "manila": "Asia/Manila", "bangkok": "Asia/Bangkok", "jakarta": "Asia/Jakarta",
+    "karachi": "Asia/Karachi", "tehran": "Asia/Tehran", "rio de janeiro": "America/Sao_Paulo",
+}
 
 
 # --- world clock: time in another city ---------------------------------------
@@ -3530,8 +3686,13 @@ def _try_tool_calling_agent(prompt: str, history: list[dict] | None = None) -> s
             return None
         if not data.get("ok"):
             return None
+        actions = data.get("actions") or []
+        try:
+            _transcript_set(route="tool_calling_agent", matched_intent="tool_calling_agent", tool_calls=actions)
+        except Exception:
+            pass
         ans = (data.get("answer") or "").strip()
-        if not ans and data.get("actions"):
+        if not ans and actions:
             ans = "Done."
         return _speakable_answer(ans) if ans else None
     except Exception:
@@ -3757,6 +3918,8 @@ def try_task_intent(raw: str) -> bool:
     for handler in (_handle_timers, _handle_notes, _handle_worldclock):
         if handler(norm):
             return True
+    if _handle_memory_query(norm, raw):
+        return True
     # Cloud brain voice controls (specific commands, safe to handle early).
     if re.search(r"\bcloud brain on\b|\benable cloud\b|\bturn on cloud\b", norm):
         _cloud_set_enabled(True)
@@ -3900,9 +4063,14 @@ if not REHEARSAL:
     if _tool_ans:
         _save_chat_turn(prompt.strip(), _tool_ans)
         _touch_interaction()
+        _transcript_set(response=_tool_ans)
         _popup(_NAME, _tool_ans[:900], timeout_ms=12000)
         _speak(_with_address(_tool_ans, is_start=_is_conversation_start()))
         _touch_interaction()
+        try:
+            _log_transcript()
+        except Exception:
+            pass
         sys.exit(0)
 
 # Correct Hyprland 0.56+ syntax — sourced from hl.meta.lua + tiling.lua + capabilities.py HYPR_ESSENTIALS
