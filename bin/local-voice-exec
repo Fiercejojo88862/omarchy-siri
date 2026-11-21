@@ -2963,7 +2963,7 @@ def _handle_computer(norm: str) -> bool:
         return False
     # Vision-enhanced screen inspection (errors/text/UI not exposed to accessibility).
     if re.search(r"\b(help me with this error|read (what'?s|what is) on (my|the) screen|read my screen|read the screen|what does (this|that) (error|message) say|what('?s| is) this error)\b", norm):
-        return _vision_describe(raw)
+        return _vision_describe(norm)
     # "what do you see / what's open" — semantic snapshot, with vision fallback.
     if re.search(r"\b(what do you see|describe (the )?screen|what'?s on (the )?screen|what windows are open|list windows|show windows|what'?s open)\b",
                  norm):
