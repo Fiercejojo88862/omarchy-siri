@@ -3485,6 +3485,59 @@ def _save_chat_turn(user: str, assistant: str) -> None:
         pass
 
 
+def _speak_filler(text: str = "One moment.") -> None:
+    """Short spoken filler while a tool-calling chain runs (best-effort, non-blocking)."""
+    try:
+        say = Path.home() / ".local/bin/local-voice-say"
+        if say.exists() and os.access(say, os.X_OK):
+            subprocess.Popen([str(say), text], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            tts = Path.home() / ".local/bin/local-voice-tts"
+            if tts.exists() and os.access(tts, os.X_OK):
+                subprocess.Popen([str(tts), text], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _try_tool_calling_agent(prompt: str, history: list[dict] | None = None) -> str | None:
+    """LLM routing via native tool-calling agent (Stage 1). Returns spoken answer or None."""
+    if REHEARSAL or os.environ.get("VOICE_DRYRUN") == "1":
+        return None
+    agent_path = Path(__file__).resolve().parent / "ruby_agent.py"
+    if not agent_path.is_file():
+        agent_path = Path.home() / ".local/bin/ruby_agent.py"
+    if not agent_path.is_file():
+        return None
+    try:
+        # Short filler while the tool-calling chain runs.
+        _speak_filler("One moment.")
+        payload = json.dumps({
+            "prompt": prompt,
+            "history": (history or [])[-10:],
+            "context": "",
+        }, ensure_ascii=False)
+        r = subprocess.run(
+            [sys.executable, str(agent_path), "--json", payload],
+            capture_output=True, text=True, timeout=70,
+        )
+        if r.returncode != 0 and not (r.stdout or "").strip():
+            return None
+        try:
+            data = json.loads((r.stdout or "").strip() or "{}")
+        except Exception:
+            return None
+        if not data.get("ok"):
+            return None
+        ans = (data.get("answer") or "").strip()
+        if not ans and data.get("actions"):
+            ans = "Done."
+        return _speakable_answer(ans) if ans else None
+    except Exception:
+        return None
+
+
 def ask_ai(question: str, context: str = "", history: list[dict] | None = None) -> str | None:
     """Answer an open-ended question: cloud first (if enabled), else local."""
     sysmsg = _QA_SYSTEM.format(name=_NAME) + _personality_prompt()
@@ -3837,6 +3890,19 @@ _is_followup = _has_history and bool(_FOLLOWUP_LIKE.search(_norm_prompt))
 if (_QUESTION_LIKE.search(_norm_prompt) or _WANTS_SUMMARY.search(_norm_prompt)
         or _is_followup):
     if _handle_ai_question(_norm_prompt, prompt):
+        sys.exit(0)
+
+# Stage 1: native tool-calling LLM routing layer (before legacy intent router).
+# Fast-path regex/deterministic commands already handled above and remain untouched.
+if not REHEARSAL:
+    _hist = _load_chat_history()
+    _tool_ans = _try_tool_calling_agent(prompt, history=_hist)
+    if _tool_ans:
+        _save_chat_turn(prompt.strip(), _tool_ans)
+        _touch_interaction()
+        _popup(_NAME, _tool_ans[:900], timeout_ms=12000)
+        _speak(_with_address(_tool_ans, is_start=_is_conversation_start()))
+        _touch_interaction()
         sys.exit(0)
 
 # Correct Hyprland 0.56+ syntax — sourced from hl.meta.lua + tiling.lua + capabilities.py HYPR_ESSENTIALS
