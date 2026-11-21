@@ -81,4 +81,16 @@ elif command -v paplay >/dev/null 2>&1; then
     echo $! > "$PLAY_PIDFILE"
     disown 2>/dev/null || true
 fi
+
+# Optional barge-in monitor (interrupts playback if user speaks).
+if [[ -f "$PLAY_PIDFILE" ]]; then
+    BARGE_MON=""
+    for c in "$HOME/.local/bin/ruby-bargein-monitor" "$HOME/omarchy-siri/bin/ruby-bargein-monitor"; do
+        [[ -x "$c" ]] && BARGE_MON="$c" && break
+    done
+    if [[ -n "$BARGE_MON" ]]; then
+        "$BARGE_MON" </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+    fi
+fi
 exit 0

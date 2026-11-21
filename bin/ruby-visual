@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Ruby bar state helper (no floating avatar overlay).
 
-Writes listening/thinking/speaking/stopped state to
+Writes shared state machine state to
 $XDG_RUNTIME_DIR/voice-assistant/ruby_state for the top-bar indicator.
-Avatar is shown only in the Ruby Engine app.
+States: idle, wake, listening, thinking, speaking, barging.
 
 Usage:
-  ruby-visual listening|thinking|speaking|hide|stopped
+  ruby-visual idle|wake|listening|thinking|speaking|barging|hide|stopped
   ruby-visual --daemon   (legacy no-op; kept for compatibility)
 """
 
@@ -28,17 +28,19 @@ def main() -> int:
     try:
         RUNTIME.mkdir(parents=True, exist_ok=True)
         if cmd == "hide-speaking":
-            # Don't clobber a newer listening state from a delayed speech hide.
+            # Don't clobber a newer state from a delayed speech hide.
             try:
                 current = STATE_FILE.read_text().strip()
             except OSError:
                 current = ""
-            if current == "speaking":
-                STATE_FILE.write_text("stopped")
+            if current in ("speaking", "barging"):
+                STATE_FILE.write_text("idle")
             return 0
         if cmd == "hide":
-            cmd = "stopped"
-        if cmd not in ("listening", "thinking", "speaking", "stopped"):
+            cmd = "idle"
+        if cmd == "stopped":
+            cmd = "idle"
+        if cmd not in ("idle", "wake", "listening", "thinking", "speaking", "barging"):
             return 0
         STATE_FILE.write_text(cmd)
     except OSError:

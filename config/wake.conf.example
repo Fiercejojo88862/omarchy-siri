@@ -17,3 +17,10 @@ WAKE_CHUNK_SECONDS=2.5
 # Optional: whisper model for wake/chunk detection (default: fast model like base.en).
 # Command captured after "Yes?" uses WHISPER_MODEL from voice.conf when set.
 WAKE_WHISPER_MODEL=
+
+# Allow barge-in: interrupt Piper TTS playback when you start speaking (1/0).
+# Requires compatible audio setup (AEC recommended for best results).
+BARGE_IN=0
+
+# Wake acknowledgment sound when "Hey Ruby" is detected (1/0).
+WAKE_SOUND=1

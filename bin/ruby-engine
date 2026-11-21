@@ -439,6 +439,23 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.wake_chunk_row.set_subtitle("Shorter = more responsive, but uses more CPU")
         self.wake_chunk_row.set_value(2.5)
         group.add(self.wake_chunk_row)
+
+        self.wake_sound_row = Adw.SwitchRow(title="Wake sound")
+        self.wake_sound_row.set_subtitle("Play a short acknowledgment sound when \"Hey Ruby\" is detected")
+        self.wake_sound_row.set_active(True)
+        group.add(self.wake_sound_row)
+
+        self.barge_in_row = Adw.SwitchRow(title="Barge-in while speaking")
+        self.barge_in_row.set_subtitle("Interrupt Ruby's speech if you start talking (best with echo cancellation)")
+        self.barge_in_row.set_active(False)
+        group.add(self.barge_in_row)
+
+        aec_row = Adw.ActionRow(title="Acoustic echo cancellation (PipeWire)", subtitle="Optional: helps barge-in avoid hearing Ruby's own voice")
+        aec_btn = Gtk.Button(label="Setup AEC", valign=Gtk.Align.CENTER)
+        aec_btn.connect("clicked", self.on_setup_aec)
+        aec_row.add_suffix(aec_btn)
+        aec_row.set_activatable_widget(aec_btn)
+        group.add(aec_row)
         content.append(group)
 
         tips = Adw.PreferencesGroup(title="How to use")
@@ -600,6 +617,8 @@ class RubyEngineWindow(Adw.ApplicationWindow):
             self.wake_chunk_row.set_value(float(w.get("WAKE_CHUNK_SECONDS", "2.5")))
         except Exception:
             self.wake_chunk_row.set_value(2.5)
+        self.wake_sound_row.set_active(w.get("WAKE_SOUND", "1").lower() in ("1", "true", "yes", "on"))
+        self.barge_in_row.set_active(w.get("BARGE_IN", "0").lower() in ("1", "true", "yes", "on"))
         self.wake_autostart_row.set_active(w.get("WAKE_AUTOSTART", "0").lower() in ("1", "true", "yes", "on") or WAKE_AUTOSTART.exists())
 
         self.refresh_usage()
@@ -703,11 +722,24 @@ class RubyEngineWindow(Adw.ApplicationWindow):
             "WAKE_PHRASES": self.wake_phrases_row.get_text().strip(),
             "WAKE_COMMAND_SECONDS": f"{self.wake_cmd_row.get_value():.1f}".rstrip('0').rstrip('.'),
             "WAKE_CHUNK_SECONDS": f"{self.wake_chunk_row.get_value():.1f}".rstrip('0').rstrip('.'),
+            "WAKE_SOUND": "1" if self.wake_sound_row.get_active() else "0",
+            "BARGE_IN": "1" if self.barge_in_row.get_active() else "0",
         }
         write_conf("wake.conf", updates)
         self.update_wake_autostart(enabled)
         self.refresh_wake_status()
         self.toast("Wake word settings saved")
+
+    def on_setup_aec(self, *_):
+        # Best-effort PipeWire echo cancellation setup for barge-in.
+        script = BIN_DIR / "ruby-aec-setup"
+        if not script.exists():
+            script = Path.home() / "omarchy-siri" / "bin" / "ruby-aec-setup"
+        try:
+            subprocess.Popen([str(script), "apply"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.toast("AEC setup requested (see script output/config if needed)")
+        except Exception:
+            self.toast("Could not run AEC setup script")
 
     def on_save_cloud(self, *_):
         updates = {

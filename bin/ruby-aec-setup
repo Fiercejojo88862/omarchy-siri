@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ruby-aec-setup — configure PipeWire echo cancellation for Ruby barge-in.
+# Creates/loads a virtual echo-cancel source/sink (module-echo-cancel) so mic
+# capture can suppress Ruby's speaker output during barge-in.
+#
+# Usage:
+#   ruby-aec-setup enable|disable|status|apply
+#
+# Notes:
+# - Requires PipeWire with module-echo-cancel (webrtc AEC). Best-effort.
+# - "apply" attempts runtime load via pw-cli/pactl (if available). For persistent
+#   setup, copy the printed PipeWire config snippet into your user config.
+set -euo pipefail
+
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/voice-assistant"
+STATE="$HOME/.local/state/voice-assistant"
+mkdir -p "$RUNTIME" "$STATE"
+AEC_FLAG="$STATE/aec_enabled"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+status() {
+  if [[ -f "$AEC_FLAG" ]]; then echo "enabled"; else echo "disabled"; fi
+}
+
+print_snippet() {
+  cat <<'EOF'
+# PipeWire echo-cancel (example). Add under context.modules in a PipeWire config
+# fragment (e.g. ~/.config/pipewire/pipewire.conf.d/99-ruby-echo-cancel.conf)
+# then restart PipeWire user services. Adjust source/sink names for your system.
+#
+# context.modules = [
+# { name = libpipewire-module-echo-cancel
+#   args = {
+#     library.name  = aec/libspa-aec-webrtc
+#     node.name     = "ruby-echo-cancel"
+#     source.props  = { node.name = "ruby_echo_cancel_source" node.description = "Ruby Echo-Cancel Source" }
+#     sink.props    = { node.name = "ruby_echo_cancel_sink" node.description = "Ruby Echo-Cancel Sink" }
+#     aec.args      = { webrtc.gain_control = true webrtc.extended_filter = true }
+#   }
+# }
+# ]
+EOF
+}
+
+apply_runtime() {
+  # Best-effort runtime load (session-dependent). Users may prefer persistent config.
+  if have pw-cli; then
+    # PipeWire module load syntax varies by version; try common form.
+    pw-cli -m lm libpipewire-module-echo-cancel '{ library.name=aec/libspa-aec-webrtc node.name=ruby-echo-cancel source.props={node.name=ruby_echo_cancel_source node.description="Ruby Echo-Cancel Source"} sink.props={node.name=ruby_echo_cancel_sink node.description="Ruby Echo-Cancel Sink"} aec.args={webrtc.gain_control=true webrtc.extended_filter=true} }' >/dev/null 2>&1 && {
+      echo "applied (pw-cli)"
+      return 0
+    }
+  fi
+  if have pactl; then
+    # Pulse compat layer (if available) - may or may not support webrtc args.
+    pactl load-module module-echo-cancel source_name=ruby_echo_cancel_source sink_name=ruby_echo_cancel_sink aec_method=webrtc >/dev/null 2>&1 && {
+      echo "applied (pactl)"
+      return 0
+    }
+  fi
+  echo "runtime apply failed or unsupported; use persistent PipeWire config snippet" >&2
+  print_snippet >&2
+  return 1
+}
+
+case "${1:-status}" in
+  enable)
+    : > "$AEC_FLAG"
+    print_snippet
+    ;;
+  disable)
+    rm -f "$AEC_FLAG"
+    echo "disabled"
+    ;;
+  status)
+    status
+    ;;
+  apply)
+    : > "$AEC_FLAG"
+    apply_runtime || true
+    print_snippet
+    ;;
+  *)
+    echo "usage: $0 {enable|disable|status|apply}" >&2
+    exit 1
+    ;;
+esac

@@ -25,6 +25,8 @@ WAKE_PHRASES=""
 WAKE_COMMAND_SECONDS="6"
 WAKE_CHUNK_SECONDS="2.5"
 WAKE_WHISPER_MODEL=""
+WAKE_SOUND="1"
+BARGE_IN="0"
 WHISPER_MODEL=""
 WHISPER_LANG="en"
 WHISPER_THREADS="4"
@@ -49,10 +51,14 @@ if [[ -f "$HOME/.config/voice-assistant/wake.conf" ]]; then
     cfg_cmd=$(grep -E '^[[:space:]]*WAKE_COMMAND_SECONDS[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     cfg_chunk=$(grep -E '^[[:space:]]*WAKE_CHUNK_SECONDS[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     cfg_wmodel=$(grep -E '^[[:space:]]*(WAKE_WHISPER_MODEL|WHISPER_MODEL)[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
+    cfg_wsound=$(grep -E '^[[:space:]]*WAKE_SOUND[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
+    cfg_barge=$(grep -E '^[[:space:]]*BARGE_IN[[:space:]]*=' "$HOME/.config/voice-assistant/wake.conf" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//') || true
     [[ -n "${cfg_phrases:-}" ]] && WAKE_PHRASES="$cfg_phrases"
     [[ -n "${cfg_cmd:-}" ]] && WAKE_COMMAND_SECONDS="$cfg_cmd"
     [[ -n "${cfg_chunk:-}" ]] && WAKE_CHUNK_SECONDS="$cfg_chunk"
     [[ -n "${cfg_wmodel:-}" ]] && WAKE_WHISPER_MODEL="${cfg_wmodel/#\~/$HOME}"
+    [[ -n "${cfg_wsound:-}" ]] && WAKE_SOUND="$cfg_wsound"
+    [[ -n "${cfg_barge:-}" ]] && BARGE_IN="$cfg_barge"
 fi
 
 pick_fast_model() {
@@ -94,6 +100,58 @@ if [[ "$name_lc" == "ruby" ]]; then
 fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not installed" >&2; exit 1; }; }
+
+set_state() {
+    local s="$1"
+    printf '%s' "$s" > "$RUN/ruby_state" 2>/dev/null || true
+}
+
+ruby_image() {
+    local p
+    for p in \
+        "$HOME/omarchy-siri/assets/ruby-assistant.png" \
+        "$HOME/omarchy-siri/assets/ruby-assistant.jpg" \
+        "$HOME/Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.png" \
+        "$HOME/Documents/omarchy-siri-archive/Ruby Photos/Ruby AI Assistant.jpg"; do
+        [[ -f "$p" ]] && { echo "$p"; return 0; }
+    done
+    echo ""
+}
+
+play_wake_sound() {
+    # Brief wake acknowledgment sound (best-effort, non-blocking).
+    local snd=""
+    for p in \
+        /usr/share/sounds/freedesktop/stereo/message-new-instant.oga \
+        /usr/share/sounds/freedesktop/stereo/message.oga \
+        /usr/share/sounds/freedesktop/stereo/bell.oga \
+        /usr/share/sounds/freedesktop/stereo/dialog-information.oga; do
+        [[ -f "$p" ]] && snd="$p" && break
+    done
+    if [[ -n "$snd" ]]; then
+        if command -v pw-play >/dev/null 2>&1; then
+            pw-play "$snd" </dev/null >/dev/null 2>&1 || true
+        elif command -v paplay >/dev/null 2>&1; then
+            paplay "$snd" </dev/null >/dev/null 2>&1 || true
+        elif command -v canberra-gtk-play >/dev/null 2>&1; then
+            canberra-gtk-play -i message </dev/null >/dev/null 2>&1 || true
+        fi
+    else
+        command -v canberra-gtk-play >/dev/null 2>&1 && canberra-gtk-play -i message </dev/null >/dev/null 2>&1 || true
+    fi
+}
+
+show_listening_notification() {
+    local img
+    img=$(ruby_image)
+    if command -v omarchy-notification-send >/dev/null 2>&1 && [[ -n "$img" ]]; then
+        omarchy-notification-send -u low -t 1200 --image "$img" "Ruby" "Listening..." 2>/dev/null || true
+    elif [[ -n "$img" ]]; then
+        notify-send -t 1200 -i "$img" "Ruby" "Listening..." 2>/dev/null || true
+    else
+        notify-send -t 1200 "Ruby" "Listening..." 2>/dev/null || true
+    fi
+}
 
 record_for() {
     local secs="$1" out="$2" allow_ptt_interrupt="${3:-1}"
@@ -225,6 +283,11 @@ run_loop() {
         [[ -z "$text" ]] && { rm -f "$CHUNK"; continue; }
         norm=$(normalize "$text")
         if wake_detected "$norm"; then
+            set_state "wake"
+            if [[ "$WAKE_SOUND" != "0" && "$WAKE_SOUND" != "false" && "$WAKE_SOUND" != "no" && "$WAKE_SOUND" != "off" ]]; then
+                play_wake_sound </dev/null >/dev/null 2>&1 &
+            fi
+            show_listening_notification
             cmd=$(extract_command "$norm" "$text")
             # If command included in same utterance, run it.
             if [[ -n "${cmd// }" ]]; then
@@ -238,33 +301,33 @@ run_loop() {
                     fi
                 fi
                 rm -f "$CHUNK"
+                set_state "thinking"
                 notify-send -t 1000 "Ruby" "Heard: $cmd" 2>/dev/null || true
                 ~/.local/bin/local-voice-exec "$cmd" </dev/null >>"$LOG" 2>&1 || true
+                set_state "idle"
                 sleep 0.3
                 continue
             fi
             rm -f "$CHUNK"
-            # Wake only: prompt and listen for command.
-            printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
-            notify-send -t 1200 "Ruby" "Yes?" 2>/dev/null || true
-            ~/.local/bin/local-voice-say "Yes?" </dev/null >/dev/null 2>&1 &
+            # Gate VAD/listening for ~300ms after wake sound plays, then listen.
+            sleep 0.3
+            set_state "listening"
             rc=0
             record_for "$WAKE_COMMAND_SECONDS" "$CMDWAV" || rc=$?
             if [[ "$rc" -eq 2 ]]; then
                 rm -f "$CMDWAV"
-                printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
+                set_state "idle"
                 sleep 0.2
                 continue
             fi
-            printf '%s' "thinking" > "$RUN/ruby_state" 2>/dev/null || true
+            set_state "thinking"
             cmd=$(transcribe "$CMDWAV" "$CMD_MODEL" "${WHISPER_THREADS:-4}")
             rm -f "$CMDWAV"
             if [[ -n "${cmd// }" ]]; then
                 notify-send -t 1200 "Ruby" "Heard: $cmd" 2>/dev/null || true
                 ~/.local/bin/local-voice-exec "$cmd" </dev/null >>"$LOG" 2>&1 || true
-            else
-                printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
             fi
+            set_state "idle"
             sleep 0.3
         else
             rm -f "$CHUNK"

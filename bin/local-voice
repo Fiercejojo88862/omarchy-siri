@@ -80,7 +80,7 @@ start_recording() {
     # Claim mic early so wake-word listener yields immediately.
     echo "pending" > "$PIDFILE"
     rm -f "$AUDIOFILE"
-    # Signal listening state for top bar indicator.
+    # Signal listening state for top bar indicator (state machine: listening).
     printf '%s' "listening" > "$RUN/ruby_state" 2>/dev/null || true
     RUBY_IMG=""
     for p in \
@@ -115,7 +115,7 @@ stop_recording() {
     fi
     pid=$(cat "$PIDFILE" 2>/dev/null || true)
     rm -f "$PIDFILE"
-    # Listening ended; processing now.
+    # Listening ended; processing now (state machine: thinking).
     printf '%s' "thinking" > "$RUN/ruby_state" 2>/dev/null || true
     # Grace period: let pw-record capture the tail end of speech so the last
     # word/syllable isn't cut off when you press Insert while finishing a sentence.
@@ -136,7 +136,7 @@ stop_recording() {
         for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
         # ensure file exists and has data (> 1KB)
         if [[ ! -f "$AUDIOFILE" ]] || [[ $(stat -c%s "$AUDIOFILE" 2>/dev/null || echo 0) -lt 1500 ]]; then
-            printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
+            printf '%s' "idle" > "$RUN/ruby_state" 2>/dev/null || true
             notify-send -t 1200 "Ruby" "Too short" 2>/dev/null || true
             rm -f "$AUDIOFILE"
             exit 0
@@ -173,7 +173,7 @@ stop_recording() {
         if [[ -z "$TEXT" ]]; then
             # No speech heard — music may be playing instead. Fall through to
             # Shazam automatically (records its own fresh sample in exec).
-            printf '%s' "stopped" > "$RUN/ruby_state" 2>/dev/null || true
+            printf '%s' "idle" > "$RUN/ruby_state" 2>/dev/null || true
             notify-send -t 1500 "Ruby" "No speech — listening for music..." 2>/dev/null || true
             exec ~/.local/bin/local-voice-exec "shazam this"
         fi

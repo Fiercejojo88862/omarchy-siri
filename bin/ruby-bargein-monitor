@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Barge-in monitor for Ruby TTS playback.
+
+While TTS is playing, listens on the microphone for user speech energy and
+interrupts playback by killing the active Piper playback PID. Optionally starts
+push-to-talk listening after interruption.
+
+Best-effort: without acoustic echo cancellation, self-echo may cause false
+triggers, so thresholds are conservative and configurable.
+"""
+
+import os
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import wave
+from pathlib import Path
+
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "voice-assistant"
+CONF = Path.home() / ".config/voice-assistant" / "wake.conf"
+PLAY_PIDFILE = RUNTIME / "tts_play.pid"
+PTT_PIDFILE = RUNTIME / "record.pid"
+
+
+def read_conf():
+    cfg = {"BARGE_IN": "0", "BARGE_IN_THRESHOLD": "1200", "BARGE_IN_HITS": "3", "BARGE_IN_START_LISTEN": "1"}
+    try:
+        for line in CONF.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            cfg[k.strip().upper()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def is_enabled():
+    c = read_conf()
+    v = c.get("BARGE_IN", "0").lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def play_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def get_play_pid() -> int:
+    try:
+        pid = int(PLAY_PIDFILE.read_text().strip())
+        return pid if pid > 0 else 0
+    except Exception:
+        return 0
+
+
+def rms_wav(path: str) -> float:
+    try:
+        with wave.open(path, "rb") as wf:
+            n = wf.getnframes()
+            if n <= 0:
+                return 0.0
+            data = wf.readframes(n)
+            sw = wf.getsampwidth()
+            ch = wf.getnchannels() or 1
+    except Exception:
+        return 0.0
+    if not data:
+        return 0.0
+    # 16-bit PCM expected (pw-record --rate=16000 --channels=1)
+    if sw == 2:
+        count = len(data) // 2
+        if count <= 0:
+            return 0.0
+        samples = struct.unpack("<" + "h" * count, data[: count * 2])
+        # downmix by taking every channel sample as-is in sum of squares
+        s2 = 0.0
+        for s in samples:
+            s2 += float(s) * float(s)
+        return (s2 / max(1, len(samples))) ** 0.5
+    elif sw == 1:
+        samples = list(data)
+        if not samples:
+            return 0.0
+        s2 = 0.0
+        for s in samples:
+            v = s - 128
+            s2 += float(v) * float(v)
+        return (s2 / len(samples)) ** 0.5
+    return 0.0
+
+
+def record_chunk(path: str, secs: float = 0.25) -> bool:
+    try:
+        p = subprocess.Popen(
+            ["pw-record", "--rate=16000", "--channels=1", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return False
+    time.sleep(secs)
+    try:
+        p.terminate()
+        for _ in range(10):
+            if p.poll() is not None:
+                break
+            time.sleep(0.02)
+        if p.poll() is None:
+            p.kill()
+    except Exception:
+        pass
+    try:
+        return os.path.getsize(path) > 1000
+    except OSError:
+        return False
+
+
+def set_state(state: str):
+    try:
+        RUNTIME.mkdir(parents=True, exist_ok=True)
+        (RUNTIME / "ruby_state").write_text(state)
+    except Exception:
+        pass
+
+
+def flush_audio_queue():
+    # Best-effort: kill players and attempt to flush sink playback.
+    for pat in ("pw-play", "paplay"):
+        try:
+            subprocess.run(["pkill", "-f", pat], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+    # Try to reduce/flush residual buffered audio via mute toggle if available.
+    if shutil_which("wpctl"):
+        try:
+            subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            time.sleep(0.05)
+            subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+    elif shutil_which("pactl"):
+        try:
+            subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            time.sleep(0.05)
+            subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+
+
+def shutil_which(cmd: str):
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        c = Path(p) / cmd
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return str(c)
+    return None
+
+
+def start_ptt_listening():
+    # Go straight to listening (PTT start).
+    set_state("listening")
+    try:
+        subprocess.Popen(
+            [str(Path.home() / ".local/bin/local-voice"), "start"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def main():
+    if os.environ.get("VOICE_REHEARSAL") == "1" or os.environ.get("VOICE_DRYRUN") == "1":
+        return 0
+    if not is_enabled():
+        return 0
+    cfg = read_conf()
+    try:
+        threshold = float(cfg.get("BARGE_IN_THRESHOLD", "1200"))
+    except Exception:
+        threshold = 1200.0
+    try:
+        hits_needed = max(1, int(float(cfg.get("BARGE_IN_HITS", "3"))))
+    except Exception:
+        hits_needed = 3
+    start_listen = str(cfg.get("BARGE_IN_START_LISTEN", "1")).lower() in ("1", "true", "yes", "on")
+
+    # Don't run if PTT is already active.
+    if PTT_PIDFILE.exists():
+        return 0
+
+    play_pid = get_play_pid()
+    if play_pid <= 0 or not play_pid_alive(play_pid):
+        return 0
+
+    hits = 0
+    with tempfile.TemporaryDirectory(prefix="ruby-bargein-", dir=str(RUNTIME if RUNTIME.exists() else "/tmp")) as td:
+        chunk = os.path.join(td, "chunk.wav")
+        # Give TTS a moment to start so we don't react instantly to initial noise.
+        time.sleep(0.35)
+        while True:
+            play_pid = get_play_pid()
+            if play_pid <= 0 or not play_pid_alive(play_pid):
+                return 0
+            # If user started PTT manually, stop monitoring.
+            if PTT_PIDFILE.exists():
+                return 0
+            if not record_chunk(chunk, 0.25):
+                hits = 0
+                continue
+            level = rms_wav(chunk)
+            if level >= threshold:
+                hits += 1
+            else:
+                hits = 0
+            if hits >= hits_needed:
+                # Barge-in: SIGTERM playback, flush audio queue, go straight to listening.
+                set_state("barging")
+                try:
+                    os.kill(play_pid, signal.SIGTERM)
+                except Exception:
+                    pass
+                try:
+                    (RUNTIME / "tts_play.pid").unlink(missing_ok=True)
+                except Exception:
+                    pass
+                flush_audio_queue()
+                if start_listen:
+                    start_ptt_listening()
+                else:
+                    set_state("idle")
+                return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
