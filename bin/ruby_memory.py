@@ -156,8 +156,8 @@ def migrate_legacy_notes(conn: sqlite3.Connection | None = None) -> int:
                 continue
             content = body or tag
             conn.execute(
-                "INSERT INTO entries(timestamp, tag, content, source, embedding_json) VALUES (?,?,?,?,?,?)",
-                (ts, tag, content, "legacy-notes", ""),
+                "INSERT INTO entries(timestamp, tag, content, source, embedding_json, embedding_model) VALUES (?,?,?,?,?,?)",
+                (ts, tag, content, "legacy-notes", "", ""),
             )
             migrated += 1
         conn.commit()
@@ -231,7 +231,7 @@ def add_entry(content: str, tag: str = "", timestamp: str | None = None, source:
     try:
         init_db(conn)
         cur = conn.execute(
-            "INSERT INTO entries(timestamp, tag, content, source, embedding_json, embedding_model) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO entries(timestamp, tag, content, source, embedding_json, embedding_model) VALUES (?,?,?,?,?,?)",
             (ts, tag, content, source, emb_json, emb_model),
         )
         conn.commit()
