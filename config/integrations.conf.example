@@ -1,0 +1,10 @@
+# Optional integrations — copy to ~/.config/voice-assistant/integrations.conf (chmod 600)
+
+# LubeLogger (vehicle maintenance/fuel). Used for car logs when configured.
+[lubelogger]
+# Base URL of your local LubeLogger instance, e.g. http://localhost:8080
+URL=
+# API key or credentials/token as required by your LubeLogger API setup.
+API_KEY=
+# Default vehicle ID for logging when not specified.
+VEHICLE_ID=

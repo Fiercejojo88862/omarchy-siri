@@ -266,6 +266,25 @@ TOOLS = [
             }
         }
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "log_car_maintenance",
+            "description": "Log a car maintenance or fuel entry. Always saves locally to memory; optionally sends to LubeLogger if configured (vehicle ID validated before any POST).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Car log text, e.g. 'oil change at 142000 miles'."},
+                    "entry_type": {"type": "string", "description": "maintenance or fuel (optional)."},
+                    "odometer": {"type": "number", "description": "Odometer reading if known (optional)."},
+                    "cost": {"type": "number", "description": "Cost if known (optional)."},
+                    "notes": {"type": "string", "description": "Extra notes (optional)."}
+                },
+                "required": ["text"]
+            }
+        }
+    },
 ]
 
 
@@ -681,6 +700,42 @@ def tool_vision_screen(args):
     return data
 
 
+def tool_log_car_maintenance(args):
+    textv = str(args.get("text") or "").strip()
+    if not textv:
+        return {"ok": False, "error": "missing text"}
+    # Always save locally first (Stage 6 fallback/source of truth).
+    local_ok = False
+    try:
+        _bin = Path(__file__).resolve().parent
+        if str(_bin) not in sys.path:
+            sys.path.insert(0, str(_bin))
+        import ruby_memory as memory
+        memory.init_db(); memory.migrate_legacy_notes()
+        memory.add_entry(textv, tag="#car", source="car")
+        local_ok = True
+    except Exception:
+        local_ok = False
+    # Optional LubeLogger integration (vehicle ID validated before any POST).
+    ll = {"ok": False, "skipped": "unconfigured"}
+    try:
+        _bin = Path(__file__).resolve().parent
+        if str(_bin) not in sys.path:
+            sys.path.insert(0, str(_bin))
+        import ruby_integrations as integ
+        parsed = {
+            "type": args.get("entry_type") or "maintenance",
+            "description": textv,
+            "notes": args.get("notes") or textv,
+            "odometer": args.get("odometer"),
+            "cost": args.get("cost"),
+        }
+        ll = integ.send_car_log(norm=textv.lower(), text=textv, parsed=parsed)
+    except Exception as e:
+        ll = {"ok": False, "error": str(e)[:120]}
+    return {"ok": bool(local_ok), "saved": "local" if local_ok else "failed", "lubelogger": ll}
+
+
 TOOL_IMPL = {
     "search_memory": tool_search_memory,
     "get_calendar": tool_get_calendar,
@@ -695,6 +750,7 @@ TOOL_IMPL = {
     "timer_reminder": tool_timer_reminder,
     "web_lookup": tool_web_lookup,
     "vision_screen": tool_vision_screen,
+    "log_car_maintenance": tool_log_car_maintenance,
 }
 
 

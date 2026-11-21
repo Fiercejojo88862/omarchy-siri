@@ -147,7 +147,7 @@ def init_config() -> int:
     persona or API key.
     """
     wrote, kept = [], []
-    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf", "voice.conf", "wake.conf"):
+    for name in ("persona.conf", "calendar.conf", "weather.conf", "translate.conf", "cloud.conf", "voice.conf", "wake.conf", "integrations.conf"):
         dst = CONFIG_DIR / name
         if dst.exists():
             kept.append(name)
@@ -2276,6 +2276,31 @@ def _handle_memory_query(norm: str, raw: str) -> bool:
     return True
 
 
+def _maybe_send_lubelogger(norm: str, text: str) -> None:
+    """Optional Stage 6: send car log to LubeLogger if configured (best effort).
+
+    Local SQLite/memory log is the source of truth; failures are ignored.
+    """
+    if REHEARSAL or os.environ.get("VOICE_DRYRUN") == "1":
+        return
+    try:
+        mod_path = Path(__file__).resolve().parent / "ruby_integrations.py"
+        if not mod_path.is_file():
+            mod_path = Path.home() / ".local/bin/ruby_integrations.py"
+        if not mod_path.is_file():
+            return
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ruby_integrations", mod_path)
+        if spec is None or spec.loader is None:
+            return
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.send_car_log(norm=norm, text=text)
+    except Exception:
+        pass
+
+
+
 def _handle_notes(norm: str) -> bool:
     if re.search(r"\b(clear|delete|forget)( my| all)? notes?\b", norm):
         _memory_clear(None)
@@ -2283,10 +2308,16 @@ def _handle_notes(norm: str) -> bool:
         return True
     m = re.search(r"^(?:please\s+)?log\s+(.+?)[.! ]*$", norm)
     if m and m.group(1).strip() not in ("out", "in", "off", "on"):
-        text = m.group(1).strip()[:240]
-        if text:
+        entry = m.group(1).strip()[:240]
+        if entry:
             tag = _log_tag(norm)
-            _memory_add(text, tag=tag, source="log")
+            _memory_add(entry, tag=tag, source="log")
+            # Stage 6: optional LubeLogger integration for car logs (local fallback remains).
+            try:
+                if tag == "#car":
+                    _maybe_send_lubelogger(norm, entry)
+            except Exception:
+                pass
             _confirm("Logged.")
             return True
     m = re.search(r"\bshow\b.{0,15}\b(gym|car|money|school)\b.{0,10}\b(logs?|notes?|entries)\b|"
