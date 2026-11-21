@@ -1,0 +1,20 @@
+# Ruby proactive watcher — copy to ~/.config/voice-assistant/watcher.conf (chmod 600)
+# Used by ruby-watcher (user service). Respects quiet/DND mode and deduplicates alerts.
+
+# Enable the watcher service features (master toggle for scheduled checks).
+WATCHER_ENABLED=0
+
+# Alert 15 minutes before upcoming iCloud calendar events (requires calendar config).
+CALENDAR_ALERTS=1
+
+# Alert if a running Docker container unexpectedly exits/crashes.
+DOCKER_ALERTS=1
+
+# Alert if a Canvas/NJIT assignment is due within 6 hours and not yet completed.
+CANVAS_ALERTS=1
+
+# Deliver a brief spoken+notification summary on unlock after being idle/locked > 2 hours.
+UNLOCK_BRIEF=1
+
+# Poll interval in seconds.
+POLL_INTERVAL=60
