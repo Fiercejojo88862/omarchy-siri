@@ -251,6 +251,21 @@ TOOLS = [
             }
         }
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "vision_screen",
+            "description": "Capture the screen and answer a question about what is visible. Use for visual/UI/error text not accessible semantically. Subject to safety guards (skips if session locked or password/auth field focused).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "What to look for or answer about the screen."}
+                },
+                "required": ["question"]
+            }
+        }
+    },
 ]
 
 
@@ -651,6 +666,21 @@ def _validate_tool_call(name, args):
     return (len(errors) == 0), errors
 
 
+def tool_vision_screen(args):
+    q = (args.get("question") or "What is on my screen?").strip()
+    script = Path(__file__).resolve().parent / "ruby_vision.py"
+    if not script.exists():
+        script = BIN_DIR / "ruby_vision.py"
+    if not script.exists():
+        return {"ok": False, "error": "vision helper unavailable"}
+    rc, out, err = _run([sys.executable, str(script), q], timeout=55)
+    try:
+        data = json.loads(out) if out else {}
+    except Exception:
+        data = {"ok": False, "error": (out or err)[:200]}
+    return data
+
+
 TOOL_IMPL = {
     "search_memory": tool_search_memory,
     "get_calendar": tool_get_calendar,
@@ -664,6 +694,7 @@ TOOL_IMPL = {
     "system_control": tool_system_control,
     "timer_reminder": tool_timer_reminder,
     "web_lookup": tool_web_lookup,
+    "vision_screen": tool_vision_screen,
 }
 
 

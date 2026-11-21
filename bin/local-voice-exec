@@ -2679,9 +2679,52 @@ def _handle_clipboard(norm: str) -> bool:
 def _handle_screenshot(norm: str) -> bool:
     if not re.search(r"\b(screenshot|screen ?shot|capture (the )?(screen|window))\b", norm):
         return False
-    _run(["omarchy", "capture", "screenshot"])
+    subprocess.run(["omarchy", "capture", "screenshot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
     _confirm("Screenshot saved.")
     return True
+
+
+def _vision_describe(question: str) -> bool:
+    """Capture screen and answer via vision model (grim + vision LLM). Stage 5."""
+    if REHEARSAL:
+        _confirm("Screen vision is disabled in rehearsal.")
+        return True
+    script = Path(__file__).resolve().parent / "ruby_vision.py"
+    if not script.is_file():
+        script = Path.home() / ".local/bin/ruby_vision.py"
+    if not script.is_file():
+        _confirm("Screen vision isn't installed.")
+        return True
+    _visual("thinking")
+    try:
+        r = subprocess.run(
+            [sys.executable, str(script), question[:500]],
+            capture_output=True, text=True, timeout=55,
+        )
+        data = {}
+        try:
+            data = json.loads((r.stdout or "").strip() or "{}")
+        except Exception:
+            data = {}
+        if not data.get("ok"):
+            err = str(data.get("error") or (r.stderr or "").strip() or "vision failed")
+            # If vision can't run, fall back to semantic screen description when asked generally.
+            if re.search(r"what.*(see|on (the )?screen|open)|describe|windows", question, re.I):
+                try:
+                    return _computer_describe()
+                except Exception:
+                    pass
+            _confirm(f"Sorry, I couldn't read the screen: {err[:160]}")
+            return True
+        ans = str(data.get("answer") or "I couldn't tell what's on screen.")
+        _touch_interaction()
+        _popup("Screen", ans[:900], timeout_ms=12000)
+        _speak(_with_address(ans, is_start=_is_conversation_start()))
+        _touch_interaction()
+        return True
+    except Exception as e:
+        _confirm(f"Sorry, screen vision failed: {e}"[:180])
+        return True
 
 
 def _handle_dictation(norm: str) -> bool:
@@ -2918,10 +2961,19 @@ def _handle_computer(norm: str) -> bool:
         if _computer_launch_ws(m.group(1), m.group(2)):
             return True
         return False
-    # "what do you see / what's open" — semantic snapshot, no screenshot.
+    # Vision-enhanced screen inspection (errors/text/UI not exposed to accessibility).
+    if re.search(r"\b(help me with this error|read (what'?s|what is) on (my|the) screen|read my screen|read the screen|what does (this|that) (error|message) say|what('?s| is) this error)\b", norm):
+        return _vision_describe(raw)
+    # "what do you see / what's open" — semantic snapshot, with vision fallback.
     if re.search(r"\b(what do you see|describe (the )?screen|what'?s on (the )?screen|what windows are open|list windows|show windows|what'?s open)\b",
                  norm):
-        return _computer_describe()
+        try:
+            mod = _hypruse()
+            if mod is None:
+                return _vision_describe("Describe what is on my screen, including windows, text, and important UI.")
+            return _computer_describe()
+        except Exception:
+            return _vision_describe("Describe what is on my screen, including windows, text, and important UI.")
     # "scroll up/down/left/right (N)".
     m = re.search(r"\bscroll\s+(up|down|left|right)\b(?:\s+(\d+))?", norm)
     if m:
@@ -2944,7 +2996,18 @@ def _computer_do(target: str, prompt: str) -> str:
     verb, _, rest = t.partition(":")
     verb, rest = verb.lower().strip(), rest.strip()
     if verb == "describe":
-        _computer_describe()
+        # Prefer semantic describe; vision fallback helps with visual/text-heavy screens.
+        if re.search(r"error|read|help me with", (prompt or ""), re.I):
+            _vision_describe(prompt or "What is on my screen?")
+        else:
+            try:
+                mod = _hypruse()
+                if mod is None:
+                    _vision_describe(prompt or "Describe what is on my screen.")
+                else:
+                    _computer_describe()
+            except Exception:
+                _vision_describe(prompt or "Describe what is on my screen.")
         return ""
     if verb == "click" and rest:
         _computer_click(rest)
