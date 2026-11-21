@@ -1,37 +1,62 @@
-# 🎙️ Siri of Omarchy
+# Ruby — Siri of Omarchy
 
-Offline push-to-talk voice assistant for Hyprland (Omarchy/Arch). Press **INS** to talk, press again to send — she transcribes locally, routes intent through a local LLM, and acts: apps, workspaces, windows, weather, timers, reminders, calendar, system controls — all confirmed aloud in a British female voice.
+<p align="center">
+  <img src="assets/ruby-assistant.png" alt="Ruby, voice assistant for Omarchy" width="320" />
+</p>
 
-> **Topics:** `hyprland` `voice-assistant` `offline` `whisper` `ollama` `piper` `arch-linux` `omarchy`
+**Ruby** is a local-first voice assistant for Hyprland on Omarchy/Arch.  
+Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-free wake-word mode. Ruby transcribes locally, routes commands through fast deterministic skills and/or an LLM (with native tool-calling), and acts on your desktop — then confirms with notifications and spoken replies.
 
-## 🧠 How it works
+> Topics: `hyprland` `voice-assistant` `offline` `whisper` `ollama` `piper` `arch-linux` `omarchy`
 
-```text
-INS ──▶ pw-record (16k mono) ──▶ whisper-cli (base.en, offline)
-       ──▶ deterministic skills / Ollama qwen2.5:3b (intent + answers)
-       ──▶ hyprctl dispatch (Lua) / apps / spoken answer
-       ──▶ popup + Piper southern-English female speaks the response
-```
+## Features
 
-Local-first and offline-capable. Core control, STT, TTS, translation, and Q&A run locally by default. Optional network features are used only when needed/enabled: weather/calendar/Canvas/Shazam as before, quick web lookups for “search … and summarize/tell me”, and an optional **cloud brain** (off by default, your API key) for faster open-ended answers with local fallback. No audio leaves the machine.
+### Voice & interaction
+- **Push-to-talk (PTT):** `Insert` toggle to record/send (`local-voice`).
+- **Wake word:** optional “Hey Ruby” listener (`local-voice-wake`) with configurable phrases/timing, wake acknowledgment sound, and ~300ms listen gate after wake.
+- **Local speech pipeline:** Whisper (`whisper-cli`) for STT and Piper for offline TTS (customizable voice/timing in `voice.conf` / Ruby Engine).
+- **Shared audio state machine:** `idle`, `wake`, `listening`, `thinking`, `speaking`, `barging` across voice components.
+- **Barge-in (optional):** interrupt TTS when you speak, flush playback queue (best-effort), and return to listening (`ruby-bargein-monitor`, `BARGE_IN` toggle).
+- **PipeWire echo-cancellation helper:** `ruby-aec-setup` for improved barge-in behavior (best-effort runtime/persistent setup guidance).
 
-## 📦 What's included
+### LLM routing & tools
+- **Native tool-calling agent:** Groq/OpenAI-compatible or local Ollama (`bin/ruby_agent.py`) with structured tool schemas, schema validation (retry once on invalid args, then answer without tool), and **2–3 hop** tool-execution cap.
+- **Deterministic fast paths preserved:** existing regex/skill handlers remain first-class for quick, reliable commands.
+- **Short in-progress filler:** brief spoken feedback while tool-calling chains run.
 
-* `bin/local-voice` — toggle recorder (start/stop, instant, detached fds)
-* `bin/local-voice-exec` — Ollama intent router (apps, Hyprland 0.56 `hl.dsp.*`, tasks, gated power actions, conversational)
-* `bin/local-voice-exec` — computer-use via hypruse: "what do you see", "click Save", "scroll down", "press Escape", "type X and press enter", "open firefox on workspace 3"
-* Chitchat: rotating jokes ("tell me a joke"), fun facts, and friendly answers (compliments, favorites, "will you marry me") — all offline, all in her voice
-* `bin/local-voice-tts` / `local-voice-say` — Siri voice: Piper `en_GB-southern_english_female-low` (offline, sub-second, mastered to 48k/24-bit)
-* `bin/ruby-engine` — **Ruby Engine** native GTK4/libadwaita app to customize voice, persona/personality, wake word, cloud brain, and more
-* `bin/local-voice-wake` — optional wake-word listener (“Hey Ruby”) for hands-free activation
-* `bin/local-voice-calendar` — merged iCloud home+work feeds (today/tomorrow/next)
-* `bin/local-voice-translate` — offline translation (local Ollama by default; LibreTranslate or argos opt-in)
-* `bin/apple-calendar` — native GTK4 agenda viewer (no browser)
-* `hypr/bindings-voice.lua` — push-to-talk and computer-use panic keys
-* `applications/ruby-engine.desktop` — app launcher (shows in Omarchy app menu)
-* `config/*.example` — calendar, weather, translation, cloud, voice, wake, and persona templates (`ASSISTANT_NAME`, default Ruby)
+### Memory & notes
+- **SQLite-backed notes/logs:** `~/.local/share/voice-assistant/memory.db` for notes and auto-tagged logs (`#gym`, `#car`, `#money`, `#school`).
+- **Semantic + keyword search:** local Ollama embeddings with **FTS5 fallback**; embedding model stored per vector to avoid mismatched-model comparisons.
+- **Legacy migration:** automatic migration from legacy `~/.local/state/voice-assistant/notes.md`.
+- **Natural memory queries:** retrieve/summarize saved notes and logs via handlers and the `search_memory` tool.
+- **Debug transcript log:** `~/.local/share/voice-assistant/transcript.jsonl` (heard text, intent/route, tool calls, response).
 
-## 🚀 Install
+### Desktop control & assistance
+- **Hyprland/system actions:** app/window/workspace/media/display/system controls through local skills/dispatch (environment-dependent capabilities).
+- **Computer use (hypruse):** semantic screen/control interaction where available (e.g. describe, click controls, scroll, keys, type/launch workflows) with safety refusals in sensitive contexts.
+- **Vision-enhanced screen inspection:** `ruby_vision.py` (`grim` + vision LLM, cloud or local Ollama vision model), **1280px downscale**, **delete-after-inference**, and safety guards that skip capture when session is locked or a password/auth field is focused.
+- **Timers/reminders, weather, calendar, clipboard, translation, web lookups, and more:** local-first skills with optional network features only where configured/needed.
+
+### Proactive & integrations
+- **Watcher daemon (`ruby-watcher`):** proactive alerts/summaries (calendar event reminders, unexpected Docker container exits, Canvas/NJIT due-soon alerts when available, unlock brief after extended idle/lock) with quiet/DND respect and **persisted last-alerted timestamps** to avoid re-firing after restarts.
+- **LubeLogger integration (optional):** send `#car` logs to LubeLogger when configured; **vehicle ID validated before any POST**, `integrations.conf` treated as sensitive (`0600`), and **local SQLite logging remains the fallback/source of truth** on failure/unconfigured/invalid ID.
+
+### Apps & UI
+- **Ruby Engine:** GTK4/libadwaita settings app (`bin/ruby-engine`) for voice, persona, wake word, cloud brain, and related controls (including Stage 4 audio/wake controls).
+- **Desktop assets:** assistant/app icons and launcher integration (`applications/ruby-engine.desktop`, `assets/`, `icons/`).
+
+## What’s included
+
+- **Core:** `bin/local-voice`, `bin/local-voice-exec`, `bin/local-voice-wake`, `bin/local-voice-tts`, `bin/local-voice-say`, `bin/local-voice-translate`
+- **LLM & memory:** `bin/ruby_agent.py`, `bin/ruby_memory.py`
+- **Vision & audio helpers:** `bin/ruby_vision.py`, `bin/ruby-visual`, `bin/ruby-bargein-monitor`, `bin/ruby-aec-setup`
+- **Proactive/integrations:** `bin/ruby_watcher.py`, `bin/ruby_integrations.py`, `systemd/user/ruby-watcher.service`
+- **UI/apps:** `bin/ruby-engine`, `applications/ruby-engine.desktop`
+- **Configs/templates:** `config/*.conf.example` (persona, voice, wake, cloud, weather, calendar, translate, watcher, integrations)
+- **Bindings & install:** `hypr/bindings-voice.lua`, `install.sh`
+- **Tests:** `tests/golden.txt`, `tests/smoke_test.py`
+
+## Install
 
 ```bash
 git clone https://github.com/Fiercejojo88862/omarchy-siri.git ~/omarchy-siri
@@ -40,72 +65,43 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Needs: Hyprland 0.56+, `whisper-cli`, `ollama` (+`qwen2.5:3b` pulled separately), PipeWire, ffmpeg, Python 3.10+, Piper voices (~30MB, fetched by `install.sh`). Computer-use needs `hypruse` (`pip install --user hypruse`, handled by `install.sh`; check with `uvx hypruse doctor`).
+**Typical requirements:** Hyprland (0.56+), `whisper-cli`, `ollama` (and a pulled chat model such as `qwen2.5:3b`), PipeWire, `ffmpeg`, Python 3.10+, Piper (+ voices).  
+Optional depending on features: `grim`/vision model for screen inspection, `hypruse` for computer-use actions, `songrec` for Shazam fallback, Docker/Canvas/calendar integrations, PipeWire AEC components for best barge-in results.
 
-## 🖱️ Computer use
+## Configuration
 
-Hyprland-native desktop control through hypruse (no root, no ydotool, no portals — same Wayland protocols as `wlrctl`). Semantic first: she reads the window tree + named controls, never guessed pixels.
+Copy/edit configs in `~/.config/voice-assistant/` (or run `local-voice-exec --init-config` where supported). Key files:
+- `persona.conf`, `voice.conf`, `wake.conf`, `cloud.conf`
+- `weather.conf`, `calendar.conf`, `translate.conf`
+- `watcher.conf`, `integrations.conf`
 
-| Say | Does |
-|---|---|
-| *"what do you see" / "what's open"* | lists windows + focused app's clickable controls |
-| *"click Save" / "press Login"* | clicks the named control (`click_ui`) |
-| *"scroll down / up"* | scrolls at the cursor |
-| *"press Escape / Control S"* | key combo via `wtype` path |
-| *"type hello and press enter"* | types, then Enter |
-| *"open firefox on workspace 3"* | launches placed on that workspace |
+**Sensitive configs** (e.g. cloud/integrations) should remain local and permission-restricted (`chmod 600` where applicable).
 
-Safety: locked sessions, password fields and system auth dialogs always refuse (`allow_auth` is never passed). Panic key: `SUPER+ALT+Backspace` → `pkill -f hypruse` (`SUPER+SHIFT+Backspace` is already Omarchy's "toggle window gaps"). Read-only rehearsal: `HYPRUSE_DRYRUN=1`; audit log: `HYPRUSE_JOURNAL=1`.
+## Usage highlights
 
-Add the keybinding to `~/.config/hypr/bindings.lua`, then `hyprctl reload`:
+- **PTT:** bind/toggle `local-voice toggle` (e.g. `Insert`) in Hyprland bindings.
+- **Wake word:** start/enable `local-voice-wake` (and optional autostart) for “Hey Ruby”.
+- **Vision screen inspection:** ask “what do you see”, “read what’s on my screen”, or “help me with this error” (requires `grim` and a configured vision model; capture is skipped when locked/password-focused).
+- **Memory:** “take a note…”, “log car/gym/money/school…”, “show my notes/logs”, and natural recall/summary queries.
+- **Watcher:** configure and enable `ruby-watcher.service` for proactive alerts/briefs.
 
-```lua
-o.bind("Insert", "Ruby: talk / send", "local-voice toggle")
+## Testing
+
+```bash
+# Deterministic routing golden tests (rehearsal; no side effects)
+./bin/local-voice-exec --selftest
+
+# Stage 1b+ regression smoke tests (canonical voice commands, rehearsal)
+python3 tests/smoke_test.py
 ```
 
-## 💎 Ruby Engine (native app)
+## Privacy & safety notes
 
-Launch **Ruby Engine** from your app menu (or run `ruby-engine`) to customize Ruby in a native GTK4/libadwaita app:
+- Local-first by design: core STT/TTS/routing/memory can run locally.
+- Optional network features are used only when configured/invoked (e.g. weather/calendar/Canvas/web lookups/cloud brain/provider integrations).
+- No audio is intended to leave the machine by default; treat API keys/tokens and personal config as secrets (`.gitignore` excludes local state/config artifacts where applicable).
+- Vision capture includes safety guards (locked session / password or secure auth focus) and temporary captures are deleted after inference.
 
-* **Avatar & status:** Ruby’s picture is shown in-app with quick status/actions.
-* **Voice:** pick any installed Piper voice, adjust speed/expressiveness/pitch, tune stop grace/speak delay, set a custom test phrase, and toggle “Heard” transcription notifications.
-* **Persona & personality:** assistant name, honorifics, affection level (none/friendly/warm/**loving**), likes/dislikes, and extra personality notes so her answers feel personal.
-* **Wake word:** say **“Hey Ruby”** (or your chosen name/phrases) for hands-free listening. Start/stop the listener, configure phrases/timing, and optionally auto-start on login.
-* **Cloud brain:** enable/configure an OpenAI-compatible provider (e.g. Groq) with daily cap and automatic local fallback on limit/error.
-* Settings are saved to `~/.config/voice-assistant/*.conf` and apply on the next response/command.
+## License
 
-## 🔊 Voice
-
-Ruby speaks with Piper (default `en_GB-southern_english_female-low`) — fully offline, sub-second. Customize voice and timing in Ruby Engine or `~/.config/voice-assistant/voice.conf` (`VOICE_MODEL`, `RATE`, `ENERGY`, `LIFT`, `STOP_GRACE`, `SPEAK_DELAY`). Other installed Piper voices can be selected in Ruby Engine.
-
-## 📅 Calendar
-
-Copy `config/calendar.conf.example` to `~/.config/voice-assistant/calendar.conf` (`chmod 600`) and add iCloud public share links (`ICS_URL_HOME`/`ICS_URL_WORK`). Ask *"what's on my calendar"*, *"work calendar"*, *"when is my next appointment"*. Bearer URLs stay on disk only.
-
-## 🧠 AI answers & web
-
-* **Questions:** ask anything (“what is photosynthesis?”, “who was Ada Lovelace?”) — Ruby answers in a short spoken response. By default this uses local Ollama (`qwen2.5:3b`); if you enable the **cloud brain**, she tries your OpenAI-compatible provider first (fast) and falls back to local on error/quota.
-* **Web:** “search the web for X” opens DuckDuckGo results in your browser. “search the web for X and tell me / summarize” fetches quick web context and speaks a summary.
-* **Cloud brain (optional, off by default):** configure `~/.config/voice-assistant/cloud.conf` (chmod 600) with your key/endpoint/model. Voice controls: “cloud brain on/off”, “how many cloud requests today”. Daily cap + cooldown; over limit she says “You've reached your generation limit.” once per cooldown and answers locally.
-* **Speed tuning:** `VOICE_STOP_GRACE` (default 0.3s, capture tail of speech before stop) and `VOICE_SPEAK_DELAY` (default 0.15s, pause before playback) — set in your environment to trade latency vs cut-off/overlap.
-
-## 🔒 Privacy
-
-`.gitignore` blocks recordings, models, `calendar.conf`, `cloud.conf`, caches, tokens, and state. The router refuses shell/file-destructive output; shutdown/reboot/logout ask for a spoken `yes` first.
-
-Translation is local (`translate.conf`), never Google Translate. Network use is explicit: weather/calendar/Canvas/Shazam as configured, web lookups when you ask to search-and-summarize, and cloud Q&A only when `CLOUD_ENABLED=1` with your key. No audio leaves the machine. (`local-voice-exec --doctor` is planned.)
-
-## 🧪 Tests
-
-`local-voice-exec --selftest` replays 71 phrases through the real router and compares the result to `tests/golden.txt`. It runs in a throwaway `HOME`, in rehearsal mode: no process is launched, no URL fetched, no audio synthesized, hypruse is never imported. Every case prints what would be said, popped up, launched or opened, plus a `HANDLER` line naming the skill that claimed it (or `LLM` when it fell through to the model).
-
-```sh
-local-voice-exec --selftest            # PASS/FAIL against the golden file
-local-voice-exec --selftest --update   # accept the current output as the golden
-```
-
-Clock, date, free disk and note timestamps are masked; everything else must match byte-for-byte, which is how refactors are proven to change nothing.
-
-## 📄 License
-
-MIT (repo code). Piper voices MIT; whisper.cpp MIT.
+MIT (repo code, unless otherwise noted). Upstream components (e.g. Piper voices, whisper.cpp) retain their respective licenses.
