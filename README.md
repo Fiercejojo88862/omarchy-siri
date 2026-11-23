@@ -61,11 +61,33 @@ Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-fre
 ```bash
 git clone https://github.com/Fiercejojo88862/omarchy-siri.git ~/omarchy-siri
 cd ~/omarchy-siri
-chmod +x install.sh
 ./install.sh
 ```
 
-**Typical requirements:** Hyprland (0.56+), `whisper-cli`, `ollama` (and a pulled chat model such as `qwen2.5:3b`), PipeWire, `ffmpeg`, Python 3.10+, Piper (+ voices).  
+The installer is all-in-one and safe to re-run. It:
+
+- installs the Arch packages Ruby needs (`whisper-cpp`, PipeWire, `ffmpeg`, `libnotify`, `grim`, `wl-clipboard`, GTK4/libadwaita, Ollama, …)
+- installs Piper TTS and optionally `hypruse`
+- downloads the Whisper model and both Piper voices
+- links every script into `~/.local/bin` and creates the desktop entries
+- creates any missing configs in `~/.config/voice-assistant/` (never overwrites yours)
+- adds the `Insert` push-to-talk binding to `~/.config/hypr/bindings.lua` and reloads Hyprland
+- installs and enables `ruby-watcher.service`
+- enables wake-word autostart when `WAKE_AUTOSTART=1`
+- pulls the local `qwen2.5:3b` model for Ollama (one-time ~2 GB) and verifies the install
+
+`sudo` may ask for your password. Then just press **Insert** to talk.
+
+**Check or repair an existing install at any time:**
+
+```bash
+./install.sh --doctor     # report exactly what is missing or broken
+./install.sh              # repair it
+./install.sh --no-deps    # skip package installs
+./install.sh --no-model   # skip the Ollama model download
+```
+
+Requirements handled by the installer: Hyprland (0.56+), PipeWire, Python 3.10+, `whisper-cli`, Piper + voices, and Ollama.  
 Optional depending on features: `grim`/vision model for screen inspection, `hypruse` for computer-use actions, `songrec` for Shazam fallback, Docker/Canvas/calendar integrations, PipeWire AEC components for best barge-in results.
 
 ## Configuration
