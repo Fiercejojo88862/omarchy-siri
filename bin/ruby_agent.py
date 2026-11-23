@@ -34,6 +34,11 @@ LOCAL_BIN = str(BIN_DIR)
 # Ensure bin on path for module imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+try:
+    from ruby_opencode import ask as _ask_opencode
+except Exception:  # noqa: BLE001 - optional backend
+    _ask_opencode = None
+
 
 def _read_kv(path: Path) -> dict:
     out = {}
@@ -51,8 +56,15 @@ def _read_kv(path: Path) -> dict:
 
 def _cloud_conf():
     c = _read_kv(CONFIG_DIR / "cloud.conf")
+    provider = (c.get("CLOUD_PROVIDER", "groq") or "groq").strip().lower()
+    backend = (c.get("BRAIN_BACKEND", "") or "").strip().lower()
+    if not backend:
+        # Backward compatible: CLOUD_PROVIDER=opencode also selects the agent.
+        backend = "opencode" if provider == "opencode" else "cloud"
     return {
         "enabled": c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on"),
+        "backend": backend,
+        "provider": provider,
         "key": c.get("CLOUD_API_KEY", ""),
         "base_url": (c.get("CLOUD_BASE_URL", "https://api.groq.com/openai/v1") or "").rstrip("/"),
         "model": c.get("CLOUD_MODEL", "llama-3.3-70b-versatile") or "llama-3.3-70b-versatile",
@@ -270,6 +282,44 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "desktop_context",
+            "description": "Read the current desktop state: active window, workspaces and open windows. Use before clicking/typing or when the user asks what is open.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_note",
+            "description": "Save a note or tagged log entry (#gym, #car, #money, #school) to Ruby's local memory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Note text."},
+                    "tag": {"type": "string", "description": "Optional tag without or with #."}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notify",
+            "description": "Show a desktop notification without speaking it. Use for links, codes or details the user needs to see.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Notification title."},
+                    "text": {"type": "string", "description": "Notification body."}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "log_car_maintenance",
             "description": "Log a car maintenance or fuel entry. Always saves locally to memory; optionally sends to LubeLogger if configured (vehicle ID validated before any POST).",
             "parameters": {
@@ -415,34 +465,123 @@ def tool_hypruse(args):
     target = str(args.get("target") or "")
     try:
         # hypruse refuses locked/password/auth contexts itself; we rely on it.
-        if action == "describe":
-            rc, out, err = _run(["hypruse", "describe"], timeout=10)
-            return {"ok": rc == 0, "output": (out or err)[:3000]}
+        # Verbs follow the current hypruse CLI (desktop/keyboard/click_ui/...).
+        if action in ("describe", "desktop"):
+            rc, out, err = _run(["hypruse", "desktop", "--json"], timeout=10)
+            return {"ok": rc == 0, "output": (out or err)[:4000]}
+        if action in ("ui", "inspect"):
+            rc, out, err = _run(["hypruse", "ui", "--json"], timeout=12)
+            return {"ok": rc == 0, "output": (out or err)[:6000]}
         if action == "click":
-            rc, out, err = _run(["hypruse", "click", target], timeout=10)
+            if not target:
+                return {"ok": False, "error": "click needs a control name"}
+            rc, out, err = _run(["hypruse", "click_ui", target], timeout=12)
             return {"ok": rc == 0, "output": (out or err)[:500]}
         if action == "scroll":
-            direction = (target or "down").split()[0]
-            amt = str(args.get("amount") or (target.split()[1] if len(target.split()) > 1 else "3"))
-            rc, out, err = _run(["hypruse", "scroll", direction, amt], timeout=10)
+            parts = (target or "down").split()
+            direction = parts[0].lower()
+            try:
+                amt = int(args.get("amount") or (parts[1] if len(parts) > 1 else 3))
+            except (TypeError, ValueError):
+                amt = 3
+            if direction in ("up", "left"):
+                amt = -abs(amt)
+            if direction in ("left", "right"):
+                cmd = ["hypruse", "pointer", "scroll", "0", str(abs(amt) if direction == "right" else -abs(amt))]
+            else:
+                cmd = ["hypruse", "pointer", "scroll", str(amt)]
+            rc, out, err = _run(cmd, timeout=10)
             return {"ok": rc == 0, "output": (out or err)[:300]}
         if action == "key":
-            keys = target.split()
-            if not keys:
-                return {"ok": False, "error": "missing key"}
-            rc, out, err = _run(["hypruse", "key", *keys], timeout=10)
+            if not target:
+                return {"ok": False, "error": "key needs a combo"}
+            combo = target.strip()
+            if " " in combo:
+                combo = "+".join(part for part in combo.split() if part)
+            rc, out, err = _run(["hypruse", "keyboard", "key", combo], timeout=10)
             return {"ok": rc == 0, "output": (out or err)[:300]}
         if action == "type":
-            rc, out, err = _run(["hypruse", "type", target], timeout=10)
+            rc, out, err = _run(["hypruse", "keyboard", "type", target], timeout=15)
             return {"ok": rc == 0, "output": (out or err)[:300]}
         if action == "launch":
+            if not target:
+                return {"ok": False, "error": "launch needs an app or command"}
+            cmd = ["hypruse", "launch"]
             ws = str(args.get("workspace") or "")
-            cmd = ["hypruse", "launch", target] + ([ws] if ws else [])
-            rc, out, err = _run(cmd, timeout=10)
+            if ws:
+                cmd += ["--workspace", ws]
+            cmd += shlex.split(target)
+            rc, out, err = _run(cmd, timeout=15)
             return {"ok": rc == 0, "output": (out or err)[:300]}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
     return {"ok": False, "error": f"unknown hypruse action: {action}"}
+
+
+def tool_desktop_context(args):
+    """Summarise what is on screen so the model can reason before acting."""
+    def hctl(*argv):
+        rc, out, _ = _run(["hyprctl", "-j", *argv], timeout=5)
+        if rc != 0:
+            return None
+        try:
+            return json.loads(out)
+        except ValueError:
+            return None
+
+    active = hctl("activewindow") or {}
+    workspaces = hctl("workspaces") or []
+    clients = hctl("clients") or []
+    if not isinstance(clients, list):
+        clients = []
+    windows = []
+    for client in clients[:12]:
+        if not isinstance(client, dict) or client.get("hidden"):
+            continue
+        windows.append({
+            "class": client.get("class") or "",
+            "title": (client.get("title") or "")[:120],
+            "workspace": (client.get("workspace") or {}).get("id"),
+            "address": client.get("address") or "",
+        })
+    return {
+        "ok": True,
+        "active": {
+            "class": active.get("class") or "",
+            "title": (active.get("title") or "")[:160],
+            "workspace": (active.get("workspace") or {}).get("id"),
+            "address": active.get("address") or "",
+        },
+        "workspaces": [
+            {"id": w.get("id"), "name": w.get("name"), "windows": w.get("windows")}
+            for w in workspaces if isinstance(w, dict) and w.get("id", 0) > 0
+        ],
+        "windows": windows,
+    }
+
+
+def tool_write_note(args):
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty note"}
+    tag = str(args.get("tag") or "").strip()
+    script = Path(__file__).resolve().parent / "ruby_memory.py"
+    cmd = [sys.executable, str(script), "add", text]
+    if tag:
+        cmd += ["--tag", tag if tag.startswith("#") else f"#{tag}"]
+    rc, out, err = _run(cmd, timeout=12)
+    return {"ok": rc == 0, "output": (out or err)[:300]}
+
+
+def tool_notify(args):
+    title = str(args.get("title") or "Ruby")[:80]
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty notification"}
+    if not _which("notify-send"):
+        return {"ok": False, "error": "notify-send not available"}
+    rc, out, err = _run(["notify-send", "-t", "4000", title, text[:400]], timeout=5)
+    return {"ok": rc == 0, "error": (err or "")[:200]}
 
 
 def tool_clipboard(args):
@@ -745,6 +884,9 @@ TOOL_IMPL = {
     "docker_restart": tool_docker_restart,
     "hyprland_dispatch": tool_hyprland_dispatch,
     "hypruse": tool_hypruse,
+    "desktop_context": tool_desktop_context,
+    "write_note": tool_write_note,
+    "notify": tool_notify,
     "clipboard": tool_clipboard,
     "system_control": tool_system_control,
     "timer_reminder": tool_timer_reminder,
@@ -808,8 +950,9 @@ def run_agent(prompt: str, history=None, context: str = "", max_steps: int = 3):
     system = (
         "You are Ruby, a helpful local-first voice assistant on Omarchy Linux. "
         "Use tools when needed to complete the user's request across windows/workspaces, "
-        "UI control (hypruse), Docker, calendar, Canvas, weather, timers/reminders, clipboard, "
-        "system/audio/Bluetooth controls, memory search, web lookup, vision, and car logs. "
+        "UI control (hypruse), desktop context, Docker, calendar, Canvas, weather, timers/reminders, "
+        "clipboard, notifications, notes, system/audio/Bluetooth controls, memory search, web lookup, "
+        "vision, and car logs. "
         "You may chain multiple tool calls in steps. "
         "Be accurate and safe: never perform destructive power actions; docker_restart requires confirmed=true only if user explicitly confirmed; "
         "hypruse must not be used in unsafe contexts (it will refuse). "
@@ -826,6 +969,23 @@ def run_agent(prompt: str, history=None, context: str = "", max_steps: int = 3):
     cloud = _cloud_conf()
     local_model = _local_model()
     actions = []
+
+    # OpenCode is a full agent with its own tools, so it bypasses the
+    # OpenAI/Ollama tool loop entirely. On any failure we fall through to the
+    # local model, matching the cloud brain's fallback behaviour.
+    if cloud["enabled"] and cloud["backend"] == "opencode" and _ask_opencode:
+        oc = _ask_opencode(prompt, history=history, context=context)
+        if oc.get("ok"):
+            return {
+                "ok": True,
+                "answer": oc.get("answer", ""),
+                "actions": oc.get("actions") or [],
+                "cloud": False,
+                "backend": "opencode",
+                "agent": oc.get("agent", ""),
+                "elapsed": oc.get("elapsed"),
+            }
+        actions.extend(oc.get("actions") or [])
 
     def try_chat(use_cloud: bool):
         if use_cloud and cloud["enabled"] and cloud["key"]:

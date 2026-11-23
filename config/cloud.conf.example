@@ -7,6 +7,9 @@
 # CLOUD_ENABLED: 0 = off (default), 1 = on
 CLOUD_ENABLED=0
 
+# BRAIN_BACKEND: cloud = OpenAI-compatible API below; opencode = local OpenCode agent
+BRAIN_BACKEND=cloud
+
 # CLOUD_PROVIDER: hint only (groq, cerebras, openrouter, openai, custom)
 CLOUD_PROVIDER=groq
 
@@ -28,3 +31,19 @@ CLOUD_DAILY_CAP=50
 # CLOUD_LIMIT_COOLDOWN: seconds before repeating the "reached your generation
 # limit" message when over cap/rate-limited. Default 3600 (1 hour).
 CLOUD_LIMIT_COOLDOWN=3600
+
+# --- OpenCode local agent brain (BRAIN_BACKEND=opencode) ---------------------
+# Runs `opencode run` non-interactively with the bundled `ruby` agent and its
+# desktop-control, vision and memory skills. Falls back to local Ollama on error.
+# Install OpenCode, then pick "OpenCode local agent" in Ruby Engine.
+OPENCODE_BIN=opencode
+# Agent to run: ruby (desktop assistant) or ruby-dev (edits files in OPENCODE_CWD)
+OPENCODE_AGENT=ruby
+# Optional model override (provider/model). Empty = OpenCode's default model.
+OPENCODE_MODEL=
+# Working directory for the agent (project discovery, relative paths).
+OPENCODE_CWD=~/.local/share/voice-assistant/agent
+# Seconds before the agent is cancelled. Keep under the router's 70s budget.
+OPENCODE_TIMEOUT=60
+# Auto-approve anything the agent's permission allowlist permits.
+OPENCODE_AUTO=1
