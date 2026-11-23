@@ -3927,7 +3927,8 @@ def ask_ai(question: str, context: str = "", history: list[dict] | None = None) 
     if history:
         base.extend(history[-_CHAT_MAX_TURNS:])
     msgs = base + [{"role": "user", "content": user}]
-    if _cloud_conf().get("backend") == "opencode":
+    conf = _cloud_conf()
+    if conf["enabled"] and conf["backend"] == "opencode":
         ans = _agent_answer(question, context=context, history=history)
         if ans:
             return ans
