@@ -318,7 +318,7 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         group.add(test_row)
         content.append(group)
 
-        group2 = Adw.PreferencesGroup(title="Behavior & timing")
+        group2 = Adw.PreferencesGroup(title="Behavior &amp; timing")
         self.stop_grace_row = Adw.SpinRow.new_with_range(0.0, 1.5, 0.05)
         self.stop_grace_row.set_title("Stop grace (seconds)")
         self.stop_grace_row.set_subtitle("Keep recording after Insert to capture sentence endings")
@@ -518,8 +518,7 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.opencode_agent = Adw.EntryRow(title="Agent")
         self.opencode_agent.set_text("ruby")
         group_oc.add(self.opencode_agent)
-        self.opencode_model = Adw.EntryRow(title="Model override")
-        self.opencode_model.set_placeholder_text("provider/model (blank = OpenCode default)")
+        self.opencode_model = Adw.EntryRow(title="Model override (blank = OpenCode default)")
         group_oc.add(self.opencode_model)
         self.opencode_status = Adw.ActionRow(title="Status", subtitle="—")
         check = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
