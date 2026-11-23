@@ -397,6 +397,38 @@ XDG_APP_DIRS = (
     Path("/usr/share/applications"),
 )
 
+# Generic app words should open whatever the user actually has installed.
+# Omarchy does not install kitty or firefox on every machine, so the hard-coded
+# alias target is only a preference, not a requirement.
+_APP_FAMILIES = {
+    "terminal": ("terminal", "console"),
+    "browser": ("browser", "web", "internet"),
+}
+_APP_CANDIDATES = {
+    "terminal": ("kitty", "ghostty", "alacritty", "foot", "wezterm",
+                 "gnome-terminal", "konsole"),
+    "browser": ("firefox", "chromium", "zen-browser", "brave",
+                "google-chrome-stable", "microsoft-edge-stable"),
+}
+
+
+def _resolve_app(query: str) -> str | None:
+    """Alias target for a spoken app name.
+
+    Generic words ("terminal", "browser", …) resolve to the first installed
+    candidate in that family. Brand names keep their exact target.
+    """
+    binary = APP_ALIASES.get(query)
+    family = next((fam for fam, words in _APP_FAMILIES.items() if query in words), None)
+    if not family:
+        return binary
+    if binary and shutil.which(binary):
+        return binary
+    for candidate in _APP_CANDIDATES[family]:
+        if shutil.which(candidate):
+            return candidate
+    return binary
+
 
 # --- persona: selective addressing and name ----------------------------------
 # Honorifics (e.g. Sir) sound only at conversation start (after a silence of
@@ -890,7 +922,7 @@ def try_fast_launch(raw: str) -> bool:
         return False
     # 1) alias table (covers dolphin/file manager, firefox/browser, etc.)
     if phrase in APP_ALIASES:
-        binary = APP_ALIASES[phrase]
+        binary = _resolve_app(phrase)
         if _launch_binary(binary):
             _confirm(f"Opening {phrase}")
             return True
@@ -2954,7 +2986,7 @@ def _computer_typetext(text: str) -> bool:
 def _computer_launch_ws(app: str, workspace: str) -> bool:
     """Open an app on a specific workspace via hypruse launch."""
     norm_app = _normalise(app)
-    binary = (APP_ALIASES.get(norm_app)
+    binary = (_resolve_app(norm_app)
               or (_desktop_binary_for(norm_app) if shutil.which("hyprctl") else None))
     if not binary:
         return False
@@ -4118,7 +4150,7 @@ if REHEARSAL:
 # launch, without launching anything.
 if prompt.startswith("--resolve="):
     _phrase = prompt[len("--resolve="):].strip().lower()
-    _alias = APP_ALIASES.get(_phrase)
+    _alias = _resolve_app(_phrase)
     print(f"phrase: {_phrase}")
     print(f"alias: {_alias or '-'}")
     print(f"on PATH: {'yes' if shutil.which(_phrase) else 'no'}")
@@ -4339,7 +4371,7 @@ try:
                 norm = _normalise(prompt)
                 m2 = re.match(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?:a\s+|an\s+|the\s+)?(.+)$", norm)
                 phrase = m2.group(1).strip() if m2 else norm
-                alias_bin = APP_ALIASES.get(phrase)
+                alias_bin = _resolve_app(phrase)
                 if alias_bin and _launch_binary(alias_bin):
                     target = alias_bin
                     launched = True
@@ -4363,7 +4395,7 @@ try:
             norm = _normalise(prompt)
             m2 = re.match(r"^(?:please\s+)?(?:open|launch|start|run)\s+(?:a\s+|an\s+|the\s+)?(.+)$", norm)
             phrase = (m2.group(1).strip() if m2 else norm)
-            hit = APP_ALIASES.get(phrase) or _desktop_binary_for(phrase)
+            hit = _resolve_app(phrase) or _desktop_binary_for(phrase)
             if hit and _launch_binary(hit):
                 notify = f"Opening {phrase}"
             elif _launch_argv(_desktop_argv_for(phrase) or []):
