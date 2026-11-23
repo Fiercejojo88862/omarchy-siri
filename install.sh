@@ -57,6 +57,11 @@ warn() { printf '%s [!]%s %s\n' "$Y" "$Z" "$*"; }
 fail() { printf '%s [x]%s %s\n' "$R" "$Z" "$*"; }
 die()  { fail "$*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+opencode_path() {
+    command -v opencode 2>/dev/null || {
+        [[ -x "$HOME/.opencode/bin/opencode" ]] && echo "$HOME/.opencode/bin/opencode"
+    } || true
+}
 
 # Run a privileged command. In a terminal we use sudo (it can prompt); when the
 # installer is launched by an agent/GUI without a TTY we fall back to pkexec.
@@ -142,6 +147,25 @@ doctor() {
         fail "Insert binding missing from $HYPR_CONF"; bad=$((bad+1))
     fi
     if [[ -f "$HOME/.config/autostart/ruby-wake.desktop" ]]; then ok "wake autostart enabled"; fi
+
+    info "Brain"
+    local ocbin
+    ocbin="$(opencode_path)"
+    if [[ -n "$ocbin" ]]; then
+        ok "opencode ($ocbin)"
+    else
+        warn "opencode not installed (cloud API and Ollama still work)"
+    fi
+    for a in ruby ruby-dev; do
+        if [[ -f "$HOME/.config/opencode/agents/$a.md" ]]; then
+            ok "OpenCode agent $a"
+        else
+            warn "OpenCode agent $a not installed"
+        fi
+    done
+    if [[ "$(conf_get "$CONF/cloud.conf" BRAIN_BACKEND cloud)" == "opencode" ]] && [[ -z "$ocbin" ]]; then
+        fail "BRAIN_BACKEND=opencode but opencode is missing"; bad=$((bad+1))
+    fi
 
     info "Services"
     if systemctl --user is-enabled ruby-watcher.service >/dev/null 2>&1; then
@@ -323,7 +347,41 @@ have gtk-update-icon-cache && gtk-update-icon-cache -f -t "$HOME/.local/share/ic
 have update-desktop-database && update-desktop-database "$APP_DIR" 2>/dev/null || true
 ok "desktop entries installed"
 
-# --------------------------------------------------------- 7. keybinding ----
+# --------------------------------------------------- 7. OpenCode agent -------
+info "Installing OpenCode agent and skills"
+OC_DIR="$HOME/.config/opencode"
+if [[ -d "$REPO/integrations/opencode" ]]; then
+    mkdir -p "$OC_DIR/agents" "$OC_DIR/skills"
+    for src in "$REPO"/integrations/opencode/agents/*.md; do
+        [[ -f "$src" ]] || continue
+        name="$(basename "$src")"
+        dst="$OC_DIR/agents/$name"
+        if [[ -f "$dst" ]] && ! cmp -s "$src" "$dst"; then
+            cp -f "$dst" "$dst.bak.$(date +%s)"
+        fi
+        cp -f "$src" "$dst"
+    done
+    for src in "$REPO"/integrations/opencode/skills/*/; do
+        [[ -d "$src" ]] || continue
+        name="$(basename "$src")"
+        dst="$OC_DIR/skills/$name"
+        mkdir -p "$dst"
+        if [[ -f "$dst/SKILL.md" ]] && ! cmp -s "$src/SKILL.md" "$dst/SKILL.md"; then
+            cp -f "$dst/SKILL.md" "$dst/SKILL.md.bak.$(date +%s)"
+        fi
+        cp -f "$src/SKILL.md" "$dst/SKILL.md"
+    done
+    ok "agents ruby and ruby-dev, plus desktop/vision/memory skills"
+else
+    warn "integrations/opencode missing; skipping agent assets"
+fi
+if [[ -n "$(opencode_path)" ]]; then
+    ok "opencode found"
+else
+    warn "opencode not installed — install it to use the OpenCode brain (cloud API still works)"
+fi
+
+# --------------------------------------------------------- 8. keybinding ----
 info "Installing Hyprland keybinding"
 if [[ ! -f "$HYPR_CONF" ]]; then
     warn "no $HYPR_CONF (not an Omarchy/Hyprland Lua config?)"
@@ -360,7 +418,7 @@ else
     warn "Hyprland not running in this session; binding applies on next login/start"
 fi
 
-# --------------------------------------------------- 8. wake autostart ------
+# --------------------------------------------------- 9. wake autostart ------
 if truthy "$(conf_get "$CONF/wake.conf" WAKE_AUTOSTART 0)"; then
     info "Enabling wake-word autostart"
     mkdir -p "$AUTOSTART_DIR"
@@ -377,7 +435,7 @@ else
     ok "wake-word autostart off (enable it in Ruby Engine or wake.conf)"
 fi
 
-# --------------------------------------------------- 9. watcher service -----
+# -------------------------------------------------- 10. watcher service -----
 info "Installing watcher service"
 if have systemctl && systemctl --user show-environment >/dev/null 2>&1; then
     systemctl --user daemon-reload
@@ -394,7 +452,7 @@ else
     warn "no user systemd session; start ruby_watcher.py yourself if you want alerts"
 fi
 
-# --------------------------------------------------------- 10. LLM ----------
+# --------------------------------------------------------- 11. LLM ----------
 if have ollama; then
     info "Checking the local LLM"
     OLLAMA_MODEL=$(conf_get "$CONF/cloud.conf" OLLAMA_MODEL qwen2.5:3b)
@@ -417,7 +475,7 @@ else
     warn "ollama missing: tool-calling agent disabled (deterministic skills still work)"
 fi
 
-# --------------------------------------------------------- 11. verify -------
+# --------------------------------------------------------- 12. verify -------
 info "Verifying installation"
 SELFTEST_FAILED=0
 if routing_ok; then
@@ -438,4 +496,5 @@ ok "Ruby is installed."
 echo
 echo "  Press Insert to talk, press it again to send."
 echo "  Say \"Hey Ruby\" after enabling the wake listener in Ruby Engine."
+echo "  Pick the OpenCode agent as Ruby's brain in Ruby Engine → Cloud Brain."
 echo "  Diagnose any time with: ./install.sh --doctor"

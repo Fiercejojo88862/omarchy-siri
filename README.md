@@ -21,8 +21,11 @@ Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-fre
 
 ### LLM routing & tools
 - **Native tool-calling agent:** Groq/OpenAI-compatible or local Ollama (`bin/ruby_agent.py`) with structured tool schemas, schema validation (retry once on invalid args, then answer without tool), and **2–3 hop** tool-execution cap.
+- **OpenCode agent brain:** choose **OpenCode local agent** in Ruby Engine → Cloud Brain. Ruby runs the bundled `ruby` agent with permissioned desktop-control, screen-vision and memory skills, and falls back to local Ollama on error (`bin/ruby_opencode.py`).
+- **Optional coding brain:** `ruby-dev` can edit files inside `OPENCODE_CWD` (opt-in; cannot push, run sudo, or install packages).
 - **Deterministic fast paths preserved:** existing regex/skill handlers remain first-class for quick, reliable commands.
 - **Short in-progress filler:** brief spoken feedback while tool-calling chains run.
+- **Desktop tools:** `desktop_context` (active window/workspaces/windows), notes, notifications, and updated `hypruse` verbs for semantic clicks, typing, keys and scrolling.
 
 ### Memory & notes
 - **SQLite-backed notes/logs:** `~/.local/share/voice-assistant/memory.db` for notes and auto-tagged logs (`#gym`, `#car`, `#money`, `#school`).
@@ -38,7 +41,7 @@ Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-fre
 - **Timers/reminders, weather, calendar, clipboard, translation, web lookups, and more:** local-first skills with optional network features only where configured/needed.
 
 ### Proactive & integrations
-- **Watcher daemon (`ruby-watcher`):** proactive alerts/summaries (calendar event reminders, unexpected Docker container exits, Canvas/NJIT due-soon alerts when available, unlock brief after extended idle/lock) with quiet/DND respect and **persisted last-alerted timestamps** to avoid re-firing after restarts.
+- **Watcher daemon (`ruby-watcher`):** proactive alerts/summaries (calendar event reminders, unexpected Docker container exits, Canvas/NJIT due-soon alerts when available, unlock brief after extended idle/lock) with quiet/DND respect and **persisted last-alerted timestamps** to avoid re-firing after restarts. The unlock brief can be written by the configured brain from live calendar/container facts (`BRIEF_BRAIN=1`) and falls back to the built-in template.
 - **LubeLogger integration (optional):** send `#car` logs to LubeLogger when configured; **vehicle ID validated before any POST**, `integrations.conf` treated as sensitive (`0600`), and **local SQLite logging remains the fallback/source of truth** on failure/unconfigured/invalid ID.
 
 ### Apps & UI
@@ -48,7 +51,8 @@ Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-fre
 ## What’s included
 
 - **Core:** `bin/local-voice`, `bin/local-voice-exec`, `bin/local-voice-wake`, `bin/local-voice-tts`, `bin/local-voice-say`, `bin/local-voice-translate`
-- **LLM & memory:** `bin/ruby_agent.py`, `bin/ruby_memory.py`
+- **LLM & memory:** `bin/ruby_agent.py`, `bin/ruby_opencode.py`, `bin/ruby_memory.py`
+- **OpenCode brain assets:** `integrations/opencode/agents/{ruby,ruby-dev}.md` and `ruby-{desktop-control,screen-vision,memory}` skills (installed by `install.sh`)
 - **Vision & audio helpers:** `bin/ruby_vision.py`, `bin/ruby-visual`, `bin/ruby-bargein-monitor`, `bin/ruby-aec-setup`
 - **Proactive/integrations:** `bin/ruby_watcher.py`, `bin/ruby_integrations.py`, `systemd/user/ruby-watcher.service`
 - **UI/apps:** `bin/ruby-engine`, `applications/ruby-engine.desktop`
@@ -98,6 +102,42 @@ Copy/edit configs in `~/.config/voice-assistant/` (or run `local-voice-exec --in
 - `watcher.conf`, `integrations.conf`
 
 **Sensitive configs** (e.g. cloud/integrations) should remain local and permission-restricted (`chmod 600` where applicable).
+
+### Choosing a brain
+
+`cloud.conf` selects what answers open-ended requests:
+
+```ini
+CLOUD_ENABLED=1
+BRAIN_BACKEND=cloud        # OpenAI-compatible API
+# or
+BRAIN_BACKEND=opencode     # local OpenCode agent
+```
+
+With `opencode`, Ruby always keeps deterministic skills first, then asks the
+agent (default 60s budget) and falls back to local Ollama if it fails. Settings:
+
+```ini
+OPENCODE_AGENT=ruby        # ruby = desktop assistant, ruby-dev = coding agent
+OPENCODE_MODEL=            # blank = OpenCode's default model
+OPENCODE_CWD=~/.local/share/voice-assistant/agent
+OPENCODE_TIMEOUT=60
+OPENCODE_AUTO=1
+```
+
+The bundled `ruby` agent can inspect the desktop, click named controls, type,
+press keys, open apps on workspaces, read the screen, and save/search notes. Its
+permission allowlist denies sudo, package installs, file edits, shell commands
+outside the allowlist, and reads of `.env`, SSH/GPG/AWS keys and
+`cloud.conf`/`integrations.conf`.
+
+Agents and skills are installed by `install.sh`, and Ruby Engine installs them
+when you save the OpenCode backend. To install or repair them manually:
+
+```bash
+./bin/ruby_opencode.py --install   # copies agents + skills, backs up edits
+./bin/ruby_opencode.py --check     # verify binary, agent, model, cwd
+```
 
 ## Usage highlights
 

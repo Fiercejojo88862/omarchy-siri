@@ -478,9 +478,15 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
 
         group = Adw.PreferencesGroup(title="Cloud brain", description="Optional faster AI answers via any OpenAI-compatible API. Falls back to local Ollama on error or when you hit your limit.")
-        self.cloud_enabled = Adw.SwitchRow(title="Enable cloud brain")
-        self.cloud_enabled.set_subtitle("Off = fully local answers")
+        self.cloud_enabled = Adw.SwitchRow(title="Enable AI brain")
+        self.cloud_enabled.set_subtitle("Off = local skills and Ollama only")
         group.add(self.cloud_enabled)
+
+        self.cloud_backend = Adw.ComboRow(title="Brain")
+        self.cloud_backend.set_subtitle("Cloud API, or a local OpenCode agent with desktop tools")
+        self.cloud_backend.set_model(Gtk.StringList.new(["Cloud API", "OpenCode local agent"]))
+        self.cloud_backend.connect("notify::selected", lambda *_: self._sync_cloud_rows())
+        group.add(self.cloud_backend)
 
         self.cloud_key = Adw.PasswordEntryRow(title="API key")
         group.add(self.cloud_key)
@@ -505,6 +511,23 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         self.cloud_cooldown.set_value(3600)
         group.add(self.cloud_cooldown)
         content.append(group)
+
+        group_oc = Adw.PreferencesGroup(
+            title="OpenCode local agent",
+            description="Runs the bundled ruby agent with desktop-control, vision and memory skills. Needs OpenCode installed; falls back to Ollama on error.")
+        self.opencode_agent = Adw.EntryRow(title="Agent")
+        self.opencode_agent.set_text("ruby")
+        group_oc.add(self.opencode_agent)
+        self.opencode_model = Adw.EntryRow(title="Model override")
+        self.opencode_model.set_placeholder_text("provider/model (blank = OpenCode default)")
+        group_oc.add(self.opencode_model)
+        self.opencode_status = Adw.ActionRow(title="Status", subtitle="—")
+        check = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
+        check.add_css_class("flat")
+        check.connect("clicked", lambda *_: self.refresh_opencode_status())
+        self.opencode_status.add_suffix(check)
+        group_oc.add(self.opencode_status)
+        content.append(group_oc)
 
         group2 = Adw.PreferencesGroup(title="Usage")
         self.usage_row = Adw.ActionRow(title="Today's requests", subtitle="—")
@@ -595,6 +618,13 @@ class RubyEngineWindow(Adw.ApplicationWindow):
 
         c = read_conf("cloud.conf")
         self.cloud_enabled.set_active(c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on"))
+        backend = (c.get("BRAIN_BACKEND", "") or "").strip().lower()
+        if not backend:
+            backend = "opencode" if (c.get("CLOUD_PROVIDER", "") or "").strip().lower() == "opencode" else "cloud"
+        self.cloud_backend.set_selected(1 if backend == "opencode" else 0)
+        self.opencode_agent.set_text(c.get("OPENCODE_AGENT", "ruby") or "ruby")
+        self.opencode_model.set_text(c.get("OPENCODE_MODEL", "") or "")
+        self._sync_cloud_rows()
         self.cloud_key.set_text(c.get("CLOUD_API_KEY", "") or "")
         self.cloud_url.set_text(c.get("CLOUD_BASE_URL", "https://api.groq.com/openai/v1") or "https://api.groq.com/openai/v1")
         self.cloud_model.set_text(c.get("CLOUD_MODEL", "llama-3.1-8b-instant") or "llama-3.1-8b-instant")
@@ -637,10 +667,18 @@ class RubyEngineWindow(Adw.ApplicationWindow):
             count = 0
         c = read_conf("cloud.conf")
         cap = c.get("CLOUD_DAILY_CAP", "50") or "50"
-        on = c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on") and bool(c.get("CLOUD_API_KEY"))
+        backend = (c.get("BRAIN_BACKEND", "") or "").strip().lower()
+        if not backend:
+            backend = "opencode" if (c.get("CLOUD_PROVIDER", "") or "").strip().lower() == "opencode" else "cloud"
+        enabled = c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+        on = enabled and (backend == "opencode" or bool(c.get("CLOUD_API_KEY")))
         self.usage_label.set_label(f"{count} / {cap}")
-        self.usage_row.set_subtitle("Cloud on" if on else "Cloud off (local answers)")
-        self.overview_cloud_status.set_label("On" if on else "Off")
+        if on and backend == "opencode":
+            self.usage_row.set_subtitle("OpenCode agent on (local)")
+            self.overview_cloud_status.set_label("OpenCode")
+        else:
+            self.usage_row.set_subtitle("Cloud on" if on else "Cloud off (local answers)")
+            self.overview_cloud_status.set_label("On" if on else "Off")
 
     def wake_running(self):
         return run_capture([str(BIN_DIR / "local-voice-wake"), "status"]) == "running"
@@ -744,15 +782,50 @@ class RubyEngineWindow(Adw.ApplicationWindow):
     def on_save_cloud(self, *_):
         updates = {
             "CLOUD_ENABLED": "1" if self.cloud_enabled.get_active() else "0",
+            "BRAIN_BACKEND": "opencode" if self.cloud_backend.get_selected() == 1 else "cloud",
             "CLOUD_API_KEY": self.cloud_key.get_text().strip(),
             "CLOUD_BASE_URL": self.cloud_url.get_text().strip() or "https://api.groq.com/openai/v1",
             "CLOUD_MODEL": self.cloud_model.get_text().strip() or "llama-3.1-8b-instant",
             "CLOUD_DAILY_CAP": str(int(self.cloud_cap.get_value())),
             "CLOUD_LIMIT_COOLDOWN": str(int(self.cloud_cooldown.get_value())),
+            "OPENCODE_AGENT": self.opencode_agent.get_text().strip() or "ruby",
+            "OPENCODE_MODEL": self.opencode_model.get_text().strip(),
         }
         write_conf("cloud.conf", updates)
+        if updates["BRAIN_BACKEND"] == "opencode":
+            installer = BIN_DIR / "ruby_opencode.py"
+            if not installer.is_file():
+                installer = Path(__file__).resolve().parent / "ruby_opencode.py"
+            if installer.is_file():
+                try:
+                    subprocess.run([sys.executable, str(installer), "--install"],
+                                   capture_output=True, text=True, timeout=15)
+                except Exception:
+                    pass
         self.refresh_usage()
-        self.toast("Cloud settings saved")
+        self.toast("Brain settings saved")
+
+    def _sync_cloud_rows(self):
+        if not hasattr(self, "opencode_agent"):
+            return
+        cloud = self.cloud_backend.get_selected() == 0
+        for row in (self.cloud_key, self.cloud_url, self.cloud_model,
+                    self.cloud_cap, self.cloud_cooldown):
+            row.set_sensitive(cloud)
+        for row in (self.opencode_agent, self.opencode_model, self.opencode_status):
+            row.set_sensitive(not cloud)
+        self.refresh_opencode_status()
+
+    def refresh_opencode_status(self):
+        binary = shutil.which("opencode") or ""
+        agent = self.opencode_agent.get_text().strip() or "ruby"
+        agent_file = Path.home() / ".config" / "opencode" / "agents" / f"{agent}.md"
+        if not binary:
+            self.opencode_status.set_subtitle("OpenCode not installed")
+        elif not agent_file.is_file():
+            self.opencode_status.set_subtitle(f"Agent {agent} not installed (run install.sh)")
+        else:
+            self.opencode_status.set_subtitle(f"Ready — {binary} · agent {agent}")
 
     def on_test_voice(self, *_):
         self.on_save_voice()

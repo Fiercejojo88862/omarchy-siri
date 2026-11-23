@@ -52,6 +52,8 @@ def read_conf():
         "DOCKER_ALERTS": "1",
         "CANVAS_ALERTS": "1",
         "UNLOCK_BRIEF": "1",
+        "BRIEF_BRAIN": "1",
+        "BRIEF_TIMEOUT": "45",
         "POLL_INTERVAL": "60",
     }
     try:
@@ -195,6 +197,57 @@ def is_locked() -> bool:
     return False
 
 
+def brain_configured() -> bool:
+    """True when a brain (cloud or OpenCode) is enabled in cloud.conf."""
+    try:
+        for line in (CONFIG_DIR / "cloud.conf").read_text().splitlines():
+            line = line.strip()
+            if line.startswith("CLOUD_ENABLED="):
+                value = line.partition("=")[2].strip().strip("'\"")
+                return truthy(value, False)
+    except OSError:
+        pass
+    return False
+
+
+def brain_brief(cfg, hours: int, facts: str) -> str:
+    """Ask the configured brain for a concise welcome-back brief.
+
+    Falls back to "" on any error so the caller can use the template.
+    """
+    if not truthy(cfg.get("BRIEF_BRAIN", "1"), True) or not brain_configured():
+        return ""
+    agent = HOME / ".local" / "bin" / "ruby_agent.py"
+    if not agent.is_file():
+        agent = Path(__file__).resolve().parent / "ruby_agent.py"
+    if not agent.is_file():
+        return ""
+    prompt = (
+        "Write my welcome-back brief. Use only the facts below; do not call tools. "
+        "One or two short spoken sentences, no lists, no markdown. Mention the most "
+        "time-sensitive item first. If nothing is notable, say it is quiet."
+    )
+    payload = json.dumps({
+        "prompt": prompt,
+        "history": [],
+        "context": f"Away for about {hours} hour(s). {facts}",
+    })
+    try:
+        timeout = max(10, int(cfg.get("BRIEF_TIMEOUT", "45") or "45"))
+    except ValueError:
+        timeout = 45
+    rc, out, err = run([sys.executable, str(agent), "--json", payload], timeout=timeout)
+    if rc != 0:
+        log(f"brief brain failed: {(err or out)[:160]}")
+        return ""
+    try:
+        data = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return ""
+    answer = (data.get("answer") or "").strip()
+    return answer[:300] if data.get("ok") and answer else ""
+
+
 def check_unlock_brief(cfg):
     if not truthy(cfg.get("UNLOCK_BRIEF", "1"), True):
         return
@@ -222,20 +275,28 @@ def check_unlock_brief(cfg):
     if not dedupe("unlock_brief", 3600):
         return
     hours = max(1, int(duration // 3600))
-    # Simple summary: time + calendar + docker counts (best effort).
+    # Facts: calendar + docker counts (best effort).
+    facts = []
     parts = [f"Welcome back. You've been away about {hours} hour{'s' if hours != 1 else ''}."]
     helper = HOME / ".local/bin/local-voice-calendar"
     if helper.exists():
         rc, out, _ = run([str(helper), "next"], timeout=8)
         if rc == 0 and out.strip():
-            parts.append(out.strip().splitlines()[0][:120])
+            next_event = out.strip().splitlines()[0][:120]
+            parts.append(next_event)
+            facts.append(f"Next calendar item: {next_event}")
     rc, out, _ = run(["docker", "ps", "--format", "{{.Names}}"], timeout=5)
     if rc == 0:
         names = [l.strip() for l in out.splitlines() if l.strip()]
         if names:
             parts.append(f"{len(names)} containers running.")
-    msg = " ".join(parts)[:240]
-    log(f"unlock brief: {msg}")
+            facts.append(f"Running containers: {', '.join(names[:8])}")
+    msg = brain_brief(cfg, hours, " ".join(facts) or "No calendar events or containers.")
+    source = "brain"
+    if not msg:
+        msg = " ".join(parts)[:240]
+        source = "template"
+    log(f"unlock brief ({source}): {msg}")
     notify("Ruby", "Welcome back", speak_text=msg)
 
 
