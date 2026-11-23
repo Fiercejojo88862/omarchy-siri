@@ -10,6 +10,7 @@ import urllib.error
 import subprocess
 import shlex
 import re
+import ast
 from pathlib import Path
 from datetime import datetime, date, timedelta
 
@@ -47,7 +48,9 @@ _STT_FIXES = [
 ]
 for _pat, _rep in _STT_FIXES:
     prompt = re.sub(_pat, _rep, prompt, flags=re.IGNORECASE)
-prompt = re.sub(r"\s+", " ", prompt).strip().strip(" ,.-")
+# Only strip trailing punctuation; leading "--" belongs to CLI flags such as
+# --selftest and --resolve, which must survive this cleanup.
+prompt = re.sub(r"\s+", " ", prompt).strip().strip(" ,.")
 
 # Runtime scratch in the private per-user tmpfs (dir 0700, files 0600 from the
 # callers' umask), cleared at logout. Recordings, Shazam samples and debug logs
@@ -2412,6 +2415,63 @@ def _handle_notes(norm: str) -> bool:
 
 
 
+_CONVERT = {
+    # (from-names, to-name, factor|func) — factor multiplies, func maps value.
+    "fahrenheit": (("fahrenheit", "fahrenheits", "f"), "celsius", lambda v: (v - 32) * 5 / 9),
+    "celsius": (("celsius", "c"), "fahrenheit", lambda v: v * 9 / 5 + 32),
+    "miles": (("miles", "mile", "mi"), "kilometers", 1.60934),
+    "kilometers": (("kilometers", "kilometer", "km", "kms"), "miles", 1 / 1.60934),
+    "feet": (("feet", "foot", "ft"), "meters", 0.3048),
+    "meters": (("meters", "meter", "m"), "feet", 3.28084),
+    "inches": (("inches", "inch", "in"), "centimeters", 2.54),
+    "centimeters": (("centimeters", "centimeter", "cm"), "inches", 1 / 2.54),
+    "pounds": (("pounds", "pound", "lbs", "lb"), "kilograms", 0.453592),
+    "kilograms": (("kilograms", "kilogram", "kg"), "pounds", 2.20462),
+    "ounces": (("ounces", "ounce", "oz"), "grams", 28.3495),
+    "grams": (("grams", "gram", "g"), "ounces", 1 / 28.3495),
+    "gallons": (("gallons", "gallon", "gal"), "liters", 3.78541),
+    "liters": (("liters", "liter", "l"), "gallons", 1 / 3.78541),
+    "mph": (("mph", "miles per hour"), "kmh", 1.60934),
+    "kmh": (("kmh", "kph", "kilometers per hour"), "mph", 1 / 1.60934),
+}
+_UNIT_ALIASES: dict[str, str] = {}
+for _canon, (_names, _to, _fn) in _CONVERT.items():
+    for _n in _names:
+        _UNIT_ALIASES[_n] = _canon
+
+
+def _num_fmt(v: float) -> str:
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def _safe_eval(expr: str) -> float | None:
+    """Arithmetic only: numbers, +-*/%**(), unary minus. No names, no calls."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+    allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+               ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+               ast.USub, ast.UAdd, ast.FloorDiv)
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            return None
+        if isinstance(node, ast.Constant) and (
+                isinstance(node.value, bool) or not isinstance(node.value, (int, float))):
+            return None
+        # Cap exponents so spoken maths cannot hang the assistant.
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+            if abs(getattr(node.right, "value", 0)) > 64:
+                return None
+    try:
+        val = eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, {})  # noqa: S307
+    except Exception:
+        return None
+    return float(val) if isinstance(val, (int, float)) else None
+
+
 def _handle_calc(norm: str) -> bool:
     # Conversions: "convert 150 fahrenheit to celsius", "how many miles is 10 kilometers".
     conv = re.search(r"convert\s+([\d.]+)\s*([a-z /]+?)\s+to\s+([a-z /]+)", norm)
@@ -2431,7 +2491,7 @@ def _handle_calc(norm: str) -> bool:
         # Unknown units fall through to web search below.
     else:
         # Tip: "18% tip on $45" / "18 percent of 45".
-        m = re.search(r"(\d+(?:\.\d+)?)\s*%?(?: percent)?\s*(?:tip|of|on)\s*\$?\s*(\d+(?:\.\d+)?)", norm)
+        m = re.search(r"(\d+(?:\.\d+)?)\s*%?(?:\s*percent)?\s*(?:tip(?:\s+on)?|of|on)\s*\$?\s*(\d+(?:\.\d+)?)", norm)
         if m and ("tip" in norm or "percent" in norm or "%" in norm):
             tip, total = float(m.group(1)), float(m.group(2))
             _confirm(f"{_num_fmt(tip)} percent of {_num_fmt(total)} is {_num_fmt(total * tip / 100)}.")
