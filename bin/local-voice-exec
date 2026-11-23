@@ -4051,8 +4051,10 @@ def _handle_ai_question(norm: str, raw: str) -> bool:
         _, count = _cloud_usage_today()
         conf = _cloud_conf()
         cap = conf["daily_cap"] or "unlimited"
-        state = "on" if (conf["enabled"] and conf["key"]) else "off"
-        _confirm(f"Cloud brain {state}. {count} of {cap} requests used today.")
+        ready = conf["enabled"] and (conf["backend"] == "opencode" or bool(conf["key"]))
+        state = "on" if ready else "off"
+        label = "OpenCode brain" if conf["backend"] == "opencode" else "Cloud brain"
+        _confirm(f"{label} {state}. {count} of {cap} requests used today.")
         return True
 
     history = _load_chat_history()
@@ -4155,8 +4157,10 @@ def try_task_intent(raw: str) -> bool:
         _, count = _cloud_usage_today()
         conf = _cloud_conf()
         cap = conf["daily_cap"] or "unlimited"
-        state = "on" if (conf["enabled"] and conf["key"]) else "off"
-        _confirm(f"Cloud brain {state}. {count} of {cap} requests used today.")
+        ready = conf["enabled"] and (conf["backend"] == "opencode" or bool(conf["key"]))
+        state = "on" if ready else "off"
+        label = "OpenCode brain" if conf["backend"] == "opencode" else "Cloud brain"
+        _confirm(f"{label} {state}. {count} of {cap} requests used today.")
         return True
     # Answers + web before weather ("search the web for weather" = search).
     for handler in (_handle_calc, _handle_spell, _handle_translate, _handle_web):
