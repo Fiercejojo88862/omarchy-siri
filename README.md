@@ -131,6 +131,14 @@ permission allowlist denies sudo, package installs, file edits, shell commands
 outside the allowlist, and reads of `.env`, SSH/GPG/AWS keys and
 `cloud.conf`/`integrations.conf`.
 
+Screen inspection needs a local vision model (or a cloud vision key):
+
+```bash
+ollama pull qwen2.5vl:3b
+```
+
+Then set `VISION_MODEL=qwen2.5vl:3b` in `voice.conf` (the template already does).
+
 Agents and skills are installed by `install.sh`, and Ruby Engine installs them
 when you save the OpenCode backend. To install or repair them manually:
 

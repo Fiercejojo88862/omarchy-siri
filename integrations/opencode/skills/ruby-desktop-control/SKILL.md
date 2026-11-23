@@ -38,7 +38,7 @@ Window and workspace verbs:
 ```bash
 hypruse hypr workspace 3
 hypruse hypr focus_window 0x55a1c2d3
-hypruse hypr focus_window 0x55a1c2d3 2    # move window to workspace 2
+hypruse hypr move_window 0x55a1c2d3 2     # move window to workspace 2
 hypruse hypr close_window 0x55a1c2d3
 hypruse hypr fullscreen
 hypruse hypr toggle_floating
