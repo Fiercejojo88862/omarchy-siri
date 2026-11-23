@@ -86,6 +86,16 @@ truthy() {
 
 size_of() { stat -c%s "$1" 2>/dev/null || echo 0; }
 
+# Deterministic routing probe: rehearsal mode, no audio, no side effects.
+# (The golden-file selftest is environment-specific: it changes with which
+# apps are installed, so the installer uses a stable probe instead.)
+routing_ok() {
+    local out
+    out=$(VOICE_REHEARSAL=1 VOICE_DRYRUN=1 VOICE_ECHO=1 \
+          "$REPO/bin/local-voice-exec" "what is 2 plus 2" 2>&1 || true)
+    grep -q "That's 4" <<<"$out"
+}
+
 # ---------------------------------------------------------------- checks -----
 check_bin() { have "$1" && ok "$1 ($(command -v "$1"))" || fail "$1 missing"; }
 check_file() {
@@ -153,11 +163,11 @@ doctor() {
         warn "Ollama server not reachable"
     fi
 
-    info "Routing self-test"
-    if "$REPO/bin/local-voice-exec" --selftest >/dev/null 2>&1; then
-        ok "local-voice-exec --selftest"
+    info "Routing"
+    if routing_ok; then
+        ok "routing probe (rehearsal)"
     else
-        fail "local-voice-exec --selftest"; bad=$((bad+1))
+        fail "routing probe (rehearsal)"; bad=$((bad+1))
     fi
 
     if (( bad > 0 )); then
@@ -410,10 +420,10 @@ fi
 # --------------------------------------------------------- 11. verify -------
 info "Verifying installation"
 SELFTEST_FAILED=0
-if "$BIN/local-voice-exec" --selftest >/dev/null 2>&1; then
-    ok "routing self-test passed"
+if routing_ok; then
+    ok "routing probe passed"
 else
-    fail "routing self-test failed (run: $BIN/local-voice-exec --selftest)"
+    fail "routing probe failed (run: $BIN/local-voice-exec \"what time is it\")"
     SELFTEST_FAILED=1
 fi
 have whisper-cli || { fail "whisper-cli still missing"; SELFTEST_FAILED=1; }
