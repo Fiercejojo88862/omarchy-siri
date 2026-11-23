@@ -21,6 +21,19 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 APP_ID = "com.omarchy.ruby-engine"
+
+# OpenCode agents shipped with Ruby, in display order.
+OPENCODE_AGENTS = ("ruby", "ruby-shell", "ruby-dev")
+OPENCODE_AGENT_LABELS = (
+    "ruby — safe desktop",
+    "ruby-shell — full shell",
+    "ruby-dev — coding workspace",
+)
+OPENCODE_AGENT_HINTS = {
+    "ruby": "Allowlisted desktop tools. No shell, no file edits.",
+    "ruby-shell": "Trusted: full shell and coding CLIs. Not sandboxed — can change anything you can.",
+    "ruby-dev": "Edits files in OPENCODE_CWD and runs project tests. No push or sudo.",
+}
 CONF_DIR = Path.home() / ".config/voice-assistant"
 STATE_DIR = Path.home() / ".local/state/voice-assistant"
 BIN_DIR = Path.home() / ".local/bin"
@@ -515,11 +528,15 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         group_oc = Adw.PreferencesGroup(
             title="OpenCode local agent",
             description="Runs the bundled ruby agent with desktop-control, vision and memory skills. Needs OpenCode installed; falls back to Ollama on error.")
-        self.opencode_agent = Adw.EntryRow(title="Agent")
-        self.opencode_agent.set_text("ruby")
+        self.opencode_agent = Adw.ComboRow(title="Agent")
+        self.opencode_agent.set_model(Gtk.StringList.new(list(OPENCODE_AGENT_LABELS)))
+        self.opencode_agent.connect("notify::selected", lambda *_: self._sync_agent_hint())
         group_oc.add(self.opencode_agent)
         self.opencode_model = Adw.EntryRow(title="Model override (blank = OpenCode default)")
         group_oc.add(self.opencode_model)
+        self.native_shell = Adw.SwitchRow(title="Allow shell tool in native agent")
+        self.native_shell.set_subtitle("Opt-in. Denylists sudo/power/deletes, but is not a sandbox.")
+        group_oc.add(self.native_shell)
         self.opencode_status = Adw.ActionRow(title="Status", subtitle="—")
         check = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
         check.add_css_class("flat")
@@ -621,8 +638,13 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         if not backend:
             backend = "opencode" if (c.get("CLOUD_PROVIDER", "") or "").strip().lower() == "opencode" else "cloud"
         self.cloud_backend.set_selected(1 if backend == "opencode" else 0)
-        self.opencode_agent.set_text(c.get("OPENCODE_AGENT", "ruby") or "ruby")
+        agent = (c.get("OPENCODE_AGENT", "ruby") or "ruby").strip()
+        self.opencode_agent.set_selected(
+            OPENCODE_AGENTS.index(agent) if agent in OPENCODE_AGENTS else 0)
+        self._sync_agent_hint()
         self.opencode_model.set_text(c.get("OPENCODE_MODEL", "") or "")
+        self.native_shell.set_active(
+            (c.get("ALLOW_SHELL", "0") or "0").lower() in ("1", "true", "yes", "on"))
         self._sync_cloud_rows()
         self.cloud_key.set_text(c.get("CLOUD_API_KEY", "") or "")
         self.cloud_url.set_text(c.get("CLOUD_BASE_URL", "https://api.groq.com/openai/v1") or "https://api.groq.com/openai/v1")
@@ -787,8 +809,9 @@ class RubyEngineWindow(Adw.ApplicationWindow):
             "CLOUD_MODEL": self.cloud_model.get_text().strip() or "llama-3.1-8b-instant",
             "CLOUD_DAILY_CAP": str(int(self.cloud_cap.get_value())),
             "CLOUD_LIMIT_COOLDOWN": str(int(self.cloud_cooldown.get_value())),
-            "OPENCODE_AGENT": self.opencode_agent.get_text().strip() or "ruby",
+            "OPENCODE_AGENT": self._selected_agent(),
             "OPENCODE_MODEL": self.opencode_model.get_text().strip(),
+            "ALLOW_SHELL": "1" if self.native_shell.get_active() else "0",
         }
         write_conf("cloud.conf", updates)
         if updates["BRAIN_BACKEND"] == "opencode":
@@ -811,13 +834,23 @@ class RubyEngineWindow(Adw.ApplicationWindow):
         for row in (self.cloud_key, self.cloud_url, self.cloud_model,
                     self.cloud_cap, self.cloud_cooldown):
             row.set_sensitive(cloud)
-        for row in (self.opencode_agent, self.opencode_model, self.opencode_status):
+        for row in (self.opencode_agent, self.opencode_model,
+                    self.opencode_status, self.native_shell):
             row.set_sensitive(not cloud)
         self.refresh_opencode_status()
 
+    def _selected_agent(self) -> str:
+        idx = self.opencode_agent.get_selected()
+        return OPENCODE_AGENTS[idx] if 0 <= idx < len(OPENCODE_AGENTS) else "ruby"
+
+    def _sync_agent_hint(self):
+        if not hasattr(self, "opencode_status"):
+            return
+        self.opencode_agent.set_subtitle(OPENCODE_AGENT_HINTS.get(self._selected_agent(), ""))
+
     def refresh_opencode_status(self):
         binary = shutil.which("opencode") or ""
-        agent = self.opencode_agent.get_text().strip() or "ruby"
+        agent = self._selected_agent()
         agent_file = Path.home() / ".config" / "opencode" / "agents" / f"{agent}.md"
         if not binary:
             self.opencode_status.set_subtitle("OpenCode not installed")

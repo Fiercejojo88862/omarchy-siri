@@ -77,12 +77,17 @@ def _local_model():
     return c.get("OLLAMA_MODEL", "qwen2.5:3b") or "qwen2.5:3b"
 
 
-def _run(cmd, timeout=12, input_text=None):
+def _run(cmd, timeout=12, input_text=None, cwd=None):
     try:
-        r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, input=input_text, capture_output=True, text=True,
+                           timeout=timeout, cwd=str(cwd) if cwd else None)
         return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
     except Exception as e:
         return 1, "", str(e)[:200]
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _which(name):
@@ -314,6 +319,40 @@ TOOLS = [
                     "text": {"type": "string", "description": "Notification body."}
                 },
                 "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "Run a shell command for builds, tests, git inspection or other terminal work. Only available when ALLOW_SHELL=1 in cloud.conf. Never use for sudo, package installs, power actions, or destructive deletes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Command to run."},
+                    "cwd": {"type": "string", "description": "Working directory (optional)."},
+                    "timeout": {"type": "integer", "description": "Seconds, max 60.", "default": 30}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_coding",
+            "description": "Hand a coding task to an installed coding-agent CLI (OpenCode, Claude Code, Codex, Cursor, Aider, Gemini). Long tasks run in the background and notify when finished.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Task for the coding agent."},
+                    "cli": {"type": "string", "enum": ["auto", "opencode", "claude", "codex", "cursor", "aider", "gemini"], "default": "auto"},
+                    "cwd": {"type": "string", "description": "Project directory (optional)."},
+                    "background": {"type": "boolean", "description": "Run detached and notify on completion. Default true.", "default": True},
+                    "timeout": {"type": "integer", "description": "Seconds for foreground runs.", "default": 300}
+                },
+                "required": ["prompt"]
             }
         }
     },
@@ -875,6 +914,63 @@ def tool_log_car_maintenance(args):
     return {"ok": bool(local_ok), "saved": "local" if local_ok else "failed", "lubelogger": ll}
 
 
+_SHELL_FORBIDDEN = re.compile(
+    r"(^|[;&|]\s*)(sudo|doas|shutdown|reboot|poweroff|mkfs(\.[a-z0-9]+)?|"
+    r"pacman\s+-S|pacman\s+-R|yay\s+-S|git\s+push)\b|"
+    r"\bdd\b[^\n]*\bof=/dev/|\brm\s+-rf\s+/(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def tool_run_shell(args):
+    conf = _read_kv(CONFIG_DIR / "cloud.conf")
+    if not _truthy(conf.get("ALLOW_SHELL", "0")):
+        return {"ok": False, "error": "shell disabled (set ALLOW_SHELL=1 in cloud.conf)"}
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return {"ok": False, "error": "empty command"}
+    if _SHELL_FORBIDDEN.search(command):
+        return {"ok": False, "error": "refused: destructive or privileged command", "command": command[:200]}
+    try:
+        timeout = max(1, min(int(args.get("timeout") or 30), 60))
+    except (TypeError, ValueError):
+        timeout = 30
+    cwd = args.get("cwd") or None
+    rc, out, err = _run(["bash", "-lc", command], timeout=timeout, cwd=cwd)
+    return {"ok": rc == 0, "exit": rc, "stdout": out[:6000], "stderr": err[:2000]}
+
+
+def tool_delegate_coding(args):
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "empty prompt"}
+    script = Path(__file__).resolve().parent / "ruby_delegate.py"
+    if not script.is_file():
+        return {"ok": False, "error": "ruby_delegate.py not found"}
+    cli = str(args.get("cli") or "auto")
+    background = args.get("background", True)
+    try:
+        timeout = max(30, min(int(args.get("timeout") or 300), 600))
+    except (TypeError, ValueError):
+        timeout = 300
+    cmd = [sys.executable, str(script), "--json", "--cli", cli, "--prompt", prompt,
+           "--timeout", str(timeout)]
+    if args.get("cwd"):
+        cmd += ["--cwd", str(args["cwd"])]
+    if background:
+        cmd.append("--background")
+    else:
+        # local-voice-exec kills the agent at 70s; keep a foreground delegate inside it.
+        timeout = min(timeout, 50)
+        cmd[cmd.index("--timeout") + 1] = str(timeout)
+    rc, out, err = _run(cmd, timeout=20 if background else 60)
+    try:
+        data = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"ok": False, "exit": rc, "error": (err or out)[:300]}
+    return data
+
+
 TOOL_IMPL = {
     "search_memory": tool_search_memory,
     "get_calendar": tool_get_calendar,
@@ -885,6 +981,8 @@ TOOL_IMPL = {
     "hyprland_dispatch": tool_hyprland_dispatch,
     "hypruse": tool_hypruse,
     "desktop_context": tool_desktop_context,
+    "run_shell": tool_run_shell,
+    "delegate_coding": tool_delegate_coding,
     "write_note": tool_write_note,
     "notify": tool_notify,
     "clipboard": tool_clipboard,
@@ -952,7 +1050,8 @@ def run_agent(prompt: str, history=None, context: str = "", max_steps: int = 3):
         "Use tools when needed to complete the user's request across windows/workspaces, "
         "UI control (hypruse), desktop context, Docker, calendar, Canvas, weather, timers/reminders, "
         "clipboard, notifications, notes, system/audio/Bluetooth controls, memory search, web lookup, "
-        "vision, and car logs. "
+        "vision, coding-agent delegation, and car logs. Shell access is available only when the user "
+        "enables ALLOW_SHELL. "
         "You may chain multiple tool calls in steps. "
         "Be accurate and safe: never perform destructive power actions; docker_restart requires confirmed=true only if user explicitly confirmed; "
         "hypruse must not be used in unsafe contexts (it will refuse). "

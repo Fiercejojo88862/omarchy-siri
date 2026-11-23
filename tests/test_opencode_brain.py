@@ -17,6 +17,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "bin"))
 
+import ruby_delegate  # noqa: E402
 import ruby_opencode  # noqa: E402
 
 
@@ -114,6 +115,37 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(conf["agent"], "ruby-dev")
             self.assertEqual(conf["timeout"], 33)
             self.assertFalse(conf["auto"])
+
+
+class DelegateTest(unittest.TestCase):
+    def test_argv_for_each_cli(self):
+        conf = {"agent": "ruby-dev", "model": "", "unsafe": False}
+        self.assertEqual(
+            ruby_delegate.build_argv("opencode", "opencode", "hi", conf)[:7],
+            ["opencode", "run", "--format", "json", "--auto", "--agent", "ruby-dev"])
+        self.assertIn("-p", ruby_delegate.build_argv("claude", "claude", "hi", conf))
+        self.assertIn("acceptEdits", ruby_delegate.build_argv("claude", "claude", "hi", conf))
+        self.assertEqual(ruby_delegate.build_argv("codex", "codex", "hi", conf)[1], "exec")
+        self.assertIn("-p", ruby_delegate.build_argv("cursor", "cursor-agent", "hi", conf))
+        self.assertIn("--yes", ruby_delegate.build_argv("aider", "aider", "hi", conf))
+        self.assertIn("-p", ruby_delegate.build_argv("gemini", "gemini", "hi", conf))
+
+    def test_unsafe_flags_are_opt_in(self):
+        conf = {"agent": "ruby-dev", "model": "", "unsafe": False}
+        safe = ruby_delegate.build_argv("claude", "claude", "hi", conf)
+        unsafe = ruby_delegate.build_argv("claude", "claude", "hi", {**conf, "unsafe": True})
+        self.assertNotIn("--dangerously-skip-permissions", safe)
+        self.assertIn("--dangerously-skip-permissions", unsafe)
+
+    def test_empty_prompt_and_unknown_cli(self):
+        self.assertFalse(ruby_delegate.run("")["ok"])
+        self.assertFalse(ruby_delegate.run("hi", cli="nope")["ok"])
+
+    def test_opencode_output_parsing(self):
+        raw = json.dumps({"type": "text", "part": {
+            "type": "text", "partID": "p", "text": "done"}})
+        answer, actions = ruby_delegate._clean_output("opencode", raw, 0)
+        self.assertEqual(answer, "done")
 
 
 class BackendSelectionTest(unittest.TestCase):

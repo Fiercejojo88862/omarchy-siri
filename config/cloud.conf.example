@@ -47,3 +47,11 @@ OPENCODE_CWD=~/.local/share/voice-assistant/agent
 OPENCODE_TIMEOUT=60
 # Auto-approve anything the agent's permission allowlist permits.
 OPENCODE_AUTO=1
+# Agent used when Ruby delegates coding work (ruby-dev edits in OPENCODE_CWD).
+OPENCODE_DELEGATE_AGENT=ruby-dev
+# Allow the SAFE agent's native shell tool. Off by default; denylisted, not
+# sandboxed. ruby-shell has shell access without this switch.
+ALLOW_SHELL=0
+# Pass each CLI's "bypass all permissions/sandbox" flag to a delegated agent.
+# Only for a throwaway workspace you already trust. Off by default.
+DELEGATE_UNSAFE=0

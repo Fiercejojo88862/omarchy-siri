@@ -21,8 +21,9 @@ Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-fre
 
 ### LLM routing & tools
 - **Native tool-calling agent:** Groq/OpenAI-compatible or local Ollama (`bin/ruby_agent.py`) with structured tool schemas, schema validation (retry once on invalid args, then answer without tool), and **2–3 hop** tool-execution cap.
-- **OpenCode agent brain:** choose **OpenCode local agent** in Ruby Engine → Cloud Brain. Ruby runs the bundled `ruby` agent with permissioned desktop-control, screen-vision and memory skills, and falls back to local Ollama on error (`bin/ruby_opencode.py`).
-- **Optional coding brain:** `ruby-dev` can edit files inside `OPENCODE_CWD` (opt-in; cannot push, run sudo, or install packages).
+- **OpenCode agent brain:** choose **OpenCode local agent** in Ruby Engine → Cloud Brain. Ruby runs a bundled agent with desktop-control, screen-vision and memory skills, and falls back to local Ollama on error (`bin/ruby_opencode.py`).
+- **Three agent postures:** `ruby` (allowlisted desktop tools, no shell or edits), `ruby-shell` (trusted full shell + coding CLIs, denylisted but **not sandboxed**), and `ruby-dev` (edits in `OPENCODE_CWD`, no push/sudo/packages).
+- **Coding-agent delegation:** `bin/ruby_delegate.py` detects and runs any installed coding CLI — OpenCode, Claude Code, Codex, Cursor Agent, Aider, Gemini — in the foreground or detached with a completion notification.
 - **Deterministic fast paths preserved:** existing regex/skill handlers remain first-class for quick, reliable commands.
 - **Short in-progress filler:** brief spoken feedback while tool-calling chains run.
 - **Desktop tools:** `desktop_context` (active window/workspaces/windows), notes, notifications, and updated `hypruse` verbs for semantic clicks, typing, keys and scrolling.
@@ -52,7 +53,8 @@ Press **Insert** to talk (push-to-talk), or say **“Hey Ruby”** for hands-fre
 
 - **Core:** `bin/local-voice`, `bin/local-voice-exec`, `bin/local-voice-wake`, `bin/local-voice-tts`, `bin/local-voice-say`, `bin/local-voice-translate`
 - **LLM & memory:** `bin/ruby_agent.py`, `bin/ruby_opencode.py`, `bin/ruby_memory.py`
-- **OpenCode brain assets:** `integrations/opencode/agents/{ruby,ruby-dev}.md` and `ruby-{desktop-control,screen-vision,memory}` skills (installed by `install.sh`)
+- **OpenCode brain assets:** `integrations/opencode/agents/{ruby,ruby-shell,ruby-dev}.md` and `ruby-{desktop-control,screen-vision,memory,coding-agents}` skills (installed by `install.sh`)
+- **Coding delegation:** `bin/ruby_delegate.py`
 - **Vision & audio helpers:** `bin/ruby_vision.py`, `bin/ruby-visual`, `bin/ruby-bargein-monitor`, `bin/ruby-aec-setup`
 - **Proactive/integrations:** `bin/ruby_watcher.py`, `bin/ruby_integrations.py`, `systemd/user/ruby-watcher.service`
 - **UI/apps:** `bin/ruby-engine`, `applications/ruby-engine.desktop`
@@ -118,8 +120,9 @@ With `opencode`, Ruby always keeps deterministic skills first, then asks the
 agent (default 60s budget) and falls back to local Ollama if it fails. Settings:
 
 ```ini
-OPENCODE_AGENT=ruby        # ruby = desktop assistant, ruby-dev = coding agent
+OPENCODE_AGENT=ruby        # ruby | ruby-shell | ruby-dev
 OPENCODE_MODEL=            # blank = OpenCode's default model
+OPENCODE_DELEGATE_AGENT=ruby-dev
 OPENCODE_CWD=~/.local/share/voice-assistant/agent
 OPENCODE_TIMEOUT=60
 OPENCODE_AUTO=1
@@ -146,6 +149,42 @@ when you save the OpenCode backend. To install or repair them manually:
 ./bin/ruby_opencode.py --install   # copies agents + skills, backs up edits
 ./bin/ruby_opencode.py --check     # verify binary, agent, model, cwd
 ```
+
+### Shell and coding agents
+
+Pick the posture in **Ruby Engine → Cloud Brain → Agent**:
+
+| Agent | Shell | Edits | Use |
+|---|---|---|---|
+| `ruby` | allowlisted commands only | no | everyday desktop control (default) |
+| `ruby-shell` | any command (denylisted basics) | yes | terminal work, delegating to coding CLIs |
+| `ruby-dev` | allowlisted dev commands | inside `OPENCODE_CWD` | hands-off coding in one project |
+
+`ruby-shell` is a **trusted mode, not a sandbox**. `--auto` means no prompt
+appears, so it can do anything your user can, including deleting files. The
+policy denies `sudo`, power actions, `pacman -S`, `mkfs`, disk `dd`, and
+`git push`, but that is a guardrail, not a jail. Secret read rules only cover
+the file-read tool; a shell command can still read those files. Run it only on a
+machine and account you trust with voice commands.
+
+For the native (Ollama/cloud) agent, set `ALLOW_SHELL=1` to expose a `run_shell`
+tool. It is capped at 60 seconds and refuses the same destructive commands.
+
+#### Delegating to another coding CLI
+
+`ruby_delegate.py` detects installed agents and runs one non-interactively:
+
+```bash
+./bin/ruby_delegate.py --list
+./bin/ruby_delegate.py --json --cli auto --cwd ~/proj --prompt "fix the failing tests"
+./bin/ruby_delegate.py --json --background --cwd ~/proj --prompt "refactor the parser"
+```
+
+`--background` writes a log under `~/.local/state/voice-assistant/delegate/`,
+writes a result JSON beside it, and sends a desktop notification on completion.
+Ruby's `delegate_coding` tool uses the same helper, so a long coding job does not
+hold up the voice request. Unsafe sandbox-bypass flags are opt-in with
+`DELEGATE_UNSAFE=1`; leave it off unless the workspace is disposable.
 
 ## Usage highlights
 

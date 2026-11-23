@@ -156,7 +156,7 @@ doctor() {
     else
         warn "opencode not installed (cloud API and Ollama still work)"
     fi
-    for a in ruby ruby-dev; do
+    for a in ruby ruby-shell ruby-dev; do
         if [[ -f "$HOME/.config/opencode/agents/$a.md" ]]; then
             ok "OpenCode agent $a"
         else
