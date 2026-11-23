@@ -34,6 +34,11 @@ LOCAL_BIN = str(BIN_DIR)
 # Ensure bin on path for module imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+try:
+    from ruby_opencode import ask as _ask_opencode
+except Exception:  # noqa: BLE001 - optional backend
+    _ask_opencode = None
+
 
 def _read_kv(path: Path) -> dict:
     out = {}
@@ -51,8 +56,15 @@ def _read_kv(path: Path) -> dict:
 
 def _cloud_conf():
     c = _read_kv(CONFIG_DIR / "cloud.conf")
+    provider = (c.get("CLOUD_PROVIDER", "groq") or "groq").strip().lower()
+    backend = (c.get("BRAIN_BACKEND", "") or "").strip().lower()
+    if not backend:
+        # Backward compatible: CLOUD_PROVIDER=opencode also selects the agent.
+        backend = "opencode" if provider == "opencode" else "cloud"
     return {
         "enabled": c.get("CLOUD_ENABLED", "0").lower() in ("1", "true", "yes", "on"),
+        "backend": backend,
+        "provider": provider,
         "key": c.get("CLOUD_API_KEY", ""),
         "base_url": (c.get("CLOUD_BASE_URL", "https://api.groq.com/openai/v1") or "").rstrip("/"),
         "model": c.get("CLOUD_MODEL", "llama-3.3-70b-versatile") or "llama-3.3-70b-versatile",
@@ -65,12 +77,17 @@ def _local_model():
     return c.get("OLLAMA_MODEL", "qwen2.5:3b") or "qwen2.5:3b"
 
 
-def _run(cmd, timeout=12, input_text=None):
+def _run(cmd, timeout=12, input_text=None, cwd=None):
     try:
-        r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, input=input_text, capture_output=True, text=True,
+                           timeout=timeout, cwd=str(cwd) if cwd else None)
         return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
     except Exception as e:
         return 1, "", str(e)[:200]
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _which(name):
@@ -270,6 +287,78 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "desktop_context",
+            "description": "Read the current desktop state: active window, workspaces and open windows. Use before clicking/typing or when the user asks what is open.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_note",
+            "description": "Save a note or tagged log entry (#gym, #car, #money, #school) to Ruby's local memory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Note text."},
+                    "tag": {"type": "string", "description": "Optional tag without or with #."}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "notify",
+            "description": "Show a desktop notification without speaking it. Use for links, codes or details the user needs to see.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Notification title."},
+                    "text": {"type": "string", "description": "Notification body."}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "Run a shell command for builds, tests, git inspection or other terminal work. Only available when ALLOW_SHELL=1 in cloud.conf. Never use for sudo, package installs, power actions, or destructive deletes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Command to run."},
+                    "cwd": {"type": "string", "description": "Working directory (optional)."},
+                    "timeout": {"type": "integer", "description": "Seconds, max 60.", "default": 30}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_coding",
+            "description": "Hand a coding task to an installed coding-agent CLI (OpenCode, Claude Code, Codex, Cursor, Aider, Gemini). Long tasks run in the background and notify when finished.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Task for the coding agent."},
+                    "cli": {"type": "string", "enum": ["auto", "opencode", "claude", "codex", "cursor", "aider", "gemini"], "default": "auto"},
+                    "cwd": {"type": "string", "description": "Project directory (optional)."},
+                    "background": {"type": "boolean", "description": "Run detached and notify on completion. Default true.", "default": True},
+                    "timeout": {"type": "integer", "description": "Seconds for foreground runs.", "default": 300}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "log_car_maintenance",
             "description": "Log a car maintenance or fuel entry. Always saves locally to memory; optionally sends to LubeLogger if configured (vehicle ID validated before any POST).",
             "parameters": {
@@ -415,34 +504,123 @@ def tool_hypruse(args):
     target = str(args.get("target") or "")
     try:
         # hypruse refuses locked/password/auth contexts itself; we rely on it.
-        if action == "describe":
-            rc, out, err = _run(["hypruse", "describe"], timeout=10)
-            return {"ok": rc == 0, "output": (out or err)[:3000]}
+        # Verbs follow the current hypruse CLI (desktop/keyboard/click_ui/...).
+        if action in ("describe", "desktop"):
+            rc, out, err = _run(["hypruse", "desktop", "--json"], timeout=10)
+            return {"ok": rc == 0, "output": (out or err)[:4000]}
+        if action in ("ui", "inspect"):
+            rc, out, err = _run(["hypruse", "ui", "--json"], timeout=12)
+            return {"ok": rc == 0, "output": (out or err)[:6000]}
         if action == "click":
-            rc, out, err = _run(["hypruse", "click", target], timeout=10)
+            if not target:
+                return {"ok": False, "error": "click needs a control name"}
+            rc, out, err = _run(["hypruse", "click_ui", target], timeout=12)
             return {"ok": rc == 0, "output": (out or err)[:500]}
         if action == "scroll":
-            direction = (target or "down").split()[0]
-            amt = str(args.get("amount") or (target.split()[1] if len(target.split()) > 1 else "3"))
-            rc, out, err = _run(["hypruse", "scroll", direction, amt], timeout=10)
+            parts = (target or "down").split()
+            direction = parts[0].lower()
+            try:
+                amt = int(args.get("amount") or (parts[1] if len(parts) > 1 else 3))
+            except (TypeError, ValueError):
+                amt = 3
+            if direction in ("up", "left"):
+                amt = -abs(amt)
+            if direction in ("left", "right"):
+                cmd = ["hypruse", "pointer", "scroll", "0", str(abs(amt) if direction == "right" else -abs(amt))]
+            else:
+                cmd = ["hypruse", "pointer", "scroll", str(amt)]
+            rc, out, err = _run(cmd, timeout=10)
             return {"ok": rc == 0, "output": (out or err)[:300]}
         if action == "key":
-            keys = target.split()
-            if not keys:
-                return {"ok": False, "error": "missing key"}
-            rc, out, err = _run(["hypruse", "key", *keys], timeout=10)
+            if not target:
+                return {"ok": False, "error": "key needs a combo"}
+            combo = target.strip()
+            if " " in combo:
+                combo = "+".join(part for part in combo.split() if part)
+            rc, out, err = _run(["hypruse", "keyboard", "key", combo], timeout=10)
             return {"ok": rc == 0, "output": (out or err)[:300]}
         if action == "type":
-            rc, out, err = _run(["hypruse", "type", target], timeout=10)
+            rc, out, err = _run(["hypruse", "keyboard", "type", target], timeout=15)
             return {"ok": rc == 0, "output": (out or err)[:300]}
         if action == "launch":
+            if not target:
+                return {"ok": False, "error": "launch needs an app or command"}
+            cmd = ["hypruse", "launch"]
             ws = str(args.get("workspace") or "")
-            cmd = ["hypruse", "launch", target] + ([ws] if ws else [])
-            rc, out, err = _run(cmd, timeout=10)
+            if ws:
+                cmd += ["--workspace", ws]
+            cmd += shlex.split(target)
+            rc, out, err = _run(cmd, timeout=15)
             return {"ok": rc == 0, "output": (out or err)[:300]}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
     return {"ok": False, "error": f"unknown hypruse action: {action}"}
+
+
+def tool_desktop_context(args):
+    """Summarise what is on screen so the model can reason before acting."""
+    def hctl(*argv):
+        rc, out, _ = _run(["hyprctl", "-j", *argv], timeout=5)
+        if rc != 0:
+            return None
+        try:
+            return json.loads(out)
+        except ValueError:
+            return None
+
+    active = hctl("activewindow") or {}
+    workspaces = hctl("workspaces") or []
+    clients = hctl("clients") or []
+    if not isinstance(clients, list):
+        clients = []
+    windows = []
+    for client in clients[:12]:
+        if not isinstance(client, dict) or client.get("hidden"):
+            continue
+        windows.append({
+            "class": client.get("class") or "",
+            "title": (client.get("title") or "")[:120],
+            "workspace": (client.get("workspace") or {}).get("id"),
+            "address": client.get("address") or "",
+        })
+    return {
+        "ok": True,
+        "active": {
+            "class": active.get("class") or "",
+            "title": (active.get("title") or "")[:160],
+            "workspace": (active.get("workspace") or {}).get("id"),
+            "address": active.get("address") or "",
+        },
+        "workspaces": [
+            {"id": w.get("id"), "name": w.get("name"), "windows": w.get("windows")}
+            for w in workspaces if isinstance(w, dict) and w.get("id", 0) > 0
+        ],
+        "windows": windows,
+    }
+
+
+def tool_write_note(args):
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty note"}
+    tag = str(args.get("tag") or "").strip()
+    script = Path(__file__).resolve().parent / "ruby_memory.py"
+    cmd = [sys.executable, str(script), "add", text]
+    if tag:
+        cmd += ["--tag", tag if tag.startswith("#") else f"#{tag}"]
+    rc, out, err = _run(cmd, timeout=12)
+    return {"ok": rc == 0, "output": (out or err)[:300]}
+
+
+def tool_notify(args):
+    title = str(args.get("title") or "Ruby")[:80]
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty notification"}
+    if not _which("notify-send"):
+        return {"ok": False, "error": "notify-send not available"}
+    rc, out, err = _run(["notify-send", "-t", "4000", title, text[:400]], timeout=5)
+    return {"ok": rc == 0, "error": (err or "")[:200]}
 
 
 def tool_clipboard(args):
@@ -736,6 +914,63 @@ def tool_log_car_maintenance(args):
     return {"ok": bool(local_ok), "saved": "local" if local_ok else "failed", "lubelogger": ll}
 
 
+_SHELL_FORBIDDEN = re.compile(
+    r"(^|[;&|]\s*)(sudo|doas|shutdown|reboot|poweroff|mkfs(\.[a-z0-9]+)?|"
+    r"pacman\s+-S|pacman\s+-R|yay\s+-S|git\s+push)\b|"
+    r"\bdd\b[^\n]*\bof=/dev/|\brm\s+-rf\s+/(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def tool_run_shell(args):
+    conf = _read_kv(CONFIG_DIR / "cloud.conf")
+    if not _truthy(conf.get("ALLOW_SHELL", "0")):
+        return {"ok": False, "error": "shell disabled (set ALLOW_SHELL=1 in cloud.conf)"}
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return {"ok": False, "error": "empty command"}
+    if _SHELL_FORBIDDEN.search(command):
+        return {"ok": False, "error": "refused: destructive or privileged command", "command": command[:200]}
+    try:
+        timeout = max(1, min(int(args.get("timeout") or 30), 60))
+    except (TypeError, ValueError):
+        timeout = 30
+    cwd = args.get("cwd") or None
+    rc, out, err = _run(["bash", "-lc", command], timeout=timeout, cwd=cwd)
+    return {"ok": rc == 0, "exit": rc, "stdout": out[:6000], "stderr": err[:2000]}
+
+
+def tool_delegate_coding(args):
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "empty prompt"}
+    script = Path(__file__).resolve().parent / "ruby_delegate.py"
+    if not script.is_file():
+        return {"ok": False, "error": "ruby_delegate.py not found"}
+    cli = str(args.get("cli") or "auto")
+    background = args.get("background", True)
+    try:
+        timeout = max(30, min(int(args.get("timeout") or 300), 600))
+    except (TypeError, ValueError):
+        timeout = 300
+    cmd = [sys.executable, str(script), "--json", "--cli", cli, "--prompt", prompt,
+           "--timeout", str(timeout)]
+    if args.get("cwd"):
+        cmd += ["--cwd", str(args["cwd"])]
+    if background:
+        cmd.append("--background")
+    else:
+        # local-voice-exec kills the agent at 70s; keep a foreground delegate inside it.
+        timeout = min(timeout, 50)
+        cmd[cmd.index("--timeout") + 1] = str(timeout)
+    rc, out, err = _run(cmd, timeout=20 if background else 60)
+    try:
+        data = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"ok": False, "exit": rc, "error": (err or out)[:300]}
+    return data
+
+
 TOOL_IMPL = {
     "search_memory": tool_search_memory,
     "get_calendar": tool_get_calendar,
@@ -745,6 +980,11 @@ TOOL_IMPL = {
     "docker_restart": tool_docker_restart,
     "hyprland_dispatch": tool_hyprland_dispatch,
     "hypruse": tool_hypruse,
+    "desktop_context": tool_desktop_context,
+    "run_shell": tool_run_shell,
+    "delegate_coding": tool_delegate_coding,
+    "write_note": tool_write_note,
+    "notify": tool_notify,
     "clipboard": tool_clipboard,
     "system_control": tool_system_control,
     "timer_reminder": tool_timer_reminder,
@@ -808,8 +1048,10 @@ def run_agent(prompt: str, history=None, context: str = "", max_steps: int = 3):
     system = (
         "You are Ruby, a helpful local-first voice assistant on Omarchy Linux. "
         "Use tools when needed to complete the user's request across windows/workspaces, "
-        "UI control (hypruse), Docker, calendar, Canvas, weather, timers/reminders, clipboard, "
-        "system/audio/Bluetooth controls, memory search, web lookup, vision, and car logs. "
+        "UI control (hypruse), desktop context, Docker, calendar, Canvas, weather, timers/reminders, "
+        "clipboard, notifications, notes, system/audio/Bluetooth controls, memory search, web lookup, "
+        "vision, coding-agent delegation, and car logs. Shell access is available only when the user "
+        "enables ALLOW_SHELL. "
         "You may chain multiple tool calls in steps. "
         "Be accurate and safe: never perform destructive power actions; docker_restart requires confirmed=true only if user explicitly confirmed; "
         "hypruse must not be used in unsafe contexts (it will refuse). "
@@ -826,6 +1068,23 @@ def run_agent(prompt: str, history=None, context: str = "", max_steps: int = 3):
     cloud = _cloud_conf()
     local_model = _local_model()
     actions = []
+
+    # OpenCode is a full agent with its own tools, so it bypasses the
+    # OpenAI/Ollama tool loop entirely. On any failure we fall through to the
+    # local model, matching the cloud brain's fallback behaviour.
+    if cloud["enabled"] and cloud["backend"] == "opencode" and _ask_opencode:
+        oc = _ask_opencode(prompt, history=history, context=context)
+        if oc.get("ok"):
+            return {
+                "ok": True,
+                "answer": oc.get("answer", ""),
+                "actions": oc.get("actions") or [],
+                "cloud": False,
+                "backend": "opencode",
+                "agent": oc.get("agent", ""),
+                "elapsed": oc.get("elapsed"),
+            }
+        actions.extend(oc.get("actions") or [])
 
     def try_chat(use_cloud: bool):
         if use_cloud and cloud["enabled"] and cloud["key"]:

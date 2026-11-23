@@ -226,32 +226,52 @@ def ask_vision(prompt: str, image_path: Path) -> tuple[str | None, str | None]:
         # fall through to local
 
     model = _local_vision_model()
-    # Try Ollama chat with images (common format)
-    payload = {
-        "model": model,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": "You are Ruby, a helpful voice assistant. Describe what you see or answer the user's question about the screen clearly in 2-5 short sentences for speech. No markdown, no bullet lists, no URLs."},
-            {"role": "user", "content": prompt[:1000], "images": [b64]},
-        ],
-        "options": {"temperature": 0.3, "num_predict": 300},
-    }
-    try:
-        req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=json.dumps(payload).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=40) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        text = (data.get("message", {}).get("content") or "").strip()
-        if text:
-            return _speakable(text), None
-        local_err = f"local vision model '{model}' returned no answer"
-    except urllib.error.HTTPError as e:
-        if getattr(e, "code", None) == 404:
-            local_err = f"local vision model '{model}' not found (pull a vision model, e.g. llava or qwen2.5vl)"
-        else:
-            local_err = f"local vision model '{model}' HTTP {getattr(e, 'code', '?')}"
-    except Exception as e:
-        local_err = str(e)[:120]
+    messages = [
+        {"role": "system", "content": "You are Ruby, a helpful voice assistant. Describe what you see or answer the user's question about the screen clearly in 2-5 short sentences for speech. No markdown, no bullet lists, no URLs."},
+        {"role": "user", "content": prompt[:1000], "images": [b64]},
+    ]
+    # First try the GPU. If the card is busy or too small, Ollama returns 500
+    # with a CUDA OOM; retry on CPU rather than failing screen inspection.
+    for attempt, options in enumerate((
+        {"temperature": 0.3, "num_predict": 300},
+        {"temperature": 0.3, "num_predict": 300, "num_gpu": 0},
+    )):
+        payload = {
+            "model": model,
+            "stream": False,
+            "keep_alive": "5m",
+            "messages": messages,
+            "options": options,
+        }
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:11434/api/chat",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=40 if attempt == 0 else 150) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            text = (data.get("message", {}).get("content") or "").strip()
+            if text:
+                return _speakable(text), None
+            local_err = f"local vision model '{model}' returned no answer"
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", "replace")[:400]
+            except Exception:
+                body = ""
+            mem_error = any(word in body.lower() for word in ("out of memory", "cuda", "terminated"))
+            if getattr(e, "code", None) == 500 and attempt == 0 and mem_error:
+                local_err = "GPU out of memory; retrying on CPU"
+                continue
+            if getattr(e, "code", None) == 404:
+                local_err = f"local vision model '{model}' not found (pull a vision model, e.g. llava or qwen2.5vl)"
+            else:
+                local_err = f"local vision model '{model}' HTTP {getattr(e, 'code', '?')}: {body[:120]}"
+            break
+        except Exception as e:
+            local_err = str(e)[:120]
+            break
     if cloud_err and local_err:
         return None, f"{cloud_err}; {local_err}"[:180]
     return None, (local_err or cloud_err or "no vision answer")

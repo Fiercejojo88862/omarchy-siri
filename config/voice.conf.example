@@ -41,3 +41,8 @@ WHISPER_PROMPT=
 
 # WHISPER_EXTRA_ARGS: extra whisper-cli flags (advanced).
 WHISPER_EXTRA_ARGS=
+
+# --- Screen vision (ruby_vision.py) ---
+# VISION_MODEL: local Ollama vision model used when no cloud vision model is
+# configured. Pull one first: ollama pull qwen2.5vl:3b
+VISION_MODEL=qwen2.5vl:3b

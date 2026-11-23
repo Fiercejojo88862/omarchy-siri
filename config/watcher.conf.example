@@ -16,5 +16,12 @@ CANVAS_ALERTS=1
 # Deliver a brief spoken+notification summary on unlock after being idle/locked > 2 hours.
 UNLOCK_BRIEF=1
 
+# Let the configured brain (cloud API or OpenCode agent) write the unlock brief
+# from live calendar/container facts. Falls back to the built-in template.
+BRIEF_BRAIN=1
+
+# Seconds allowed for the brain before falling back. Keep it short.
+BRIEF_TIMEOUT=45
+
 # Poll interval in seconds.
 POLL_INTERVAL=60
